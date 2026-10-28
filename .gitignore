@@ -1,0 +1,28 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local database and runtime state
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Build output
+/clachan
+/dist/
+*.exe
+*.test
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local agent/tool configuration
+opencode.jsonc

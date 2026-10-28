@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="Clachan — a small, self-hosted AI chat for your LAN.">
+<title>Clachan</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9a066'/%3E%3Cpath d='M10 23V9h4l4 6 4-6h4v14h-3.4v-8.4L18 20.6l-4.6-6.6V23z' fill='%2314161a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L18 10a2.83 2.83 0 0 0-4-4L4 16v4z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M7 14v6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><path d="M4 7h3l10 10h3M4 17h3L17 7h3M18 4l3 3-3 3M18 14l3 3-3 3"/></symbol>
+  <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6 4h12v17l-6-4-6 4z"/></symbol>
+  <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M20 11l-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-2.8-2.8L14 7"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V15a3 3 0 0 0 4 2.8V20M15 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8V15a3 3 0 0 1-4 2.8V20M12 4v16M9 8h6M8 13h8"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7zM14 3v5h5"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 8V3h10v5M7 17H4V9h16v8h-3M7 14h10v7H7z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+</svg>
+
+<div class="app" id="app" hidden>
+  <aside class="sidebar" id="sidebar" aria-label="Conversations">
+    <div class="sidebar-top">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span class="brand-name">Clachan</span>
+      </div>
+      <button class="btn btn-new" id="new-chat" type="button">
+        <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+        <span>New chat</span>
+      </button>
+    </div>
+
+    <nav class="conv-list" id="conv-list" aria-label="Conversation history"></nav>
+
+    <div class="sidebar-bottom">
+      <button class="profile-chip" id="open-profiles" type="button" aria-label="Profiles and account">
+        <span class="avatar" id="profile-avatar" aria-hidden="true">?</span>
+        <span class="profile-chip-text">
+          <span class="profile-chip-name" id="profile-chip-name">Not signed in</span>
+          <span class="profile-chip-sub" id="profile-chip-sub">Profile</span>
+        </span>
+      </button>
+      <div class="sidebar-bottom-tools">
+        <button class="icon-btn" id="open-settings" type="button" aria-label="Settings" title="Settings">
+          <svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>
+        </button>
+        <span class="version" id="version"></span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="scrim" id="scrim" hidden></div>
+
+  <main class="chat">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="menu" type="button" aria-label="Open conversations" aria-controls="sidebar" aria-expanded="false">
+        <svg class="icon" aria-hidden="true"><use href="#i-menu"></use></svg>
+      </button>
+
+      <div class="chat-heading">
+        <h1 id="chat-title">New chat</h1>
+        <p class="chat-sub" id="chat-sub">OpenRouter</p>
+      </div>
+
+      <div class="pickers">
+        <button class="picker-trigger model-trigger" id="model-picker" type="button" aria-haspopup="dialog" aria-controls="model-dialog">
+          <span class="picker-trigger-text">
+            <span class="picker-trigger-name" id="model-trigger-name">Choose a model</span>
+            <span class="picker-trigger-meta" id="model-trigger-meta"></span>
+          </span>
+          <span class="picker-trigger-badges" id="model-trigger-badges"></span>
+          <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"></use></svg>
+        </button>
+        <button class="picker-trigger routing-trigger" id="routing-picker" type="button" aria-haspopup="dialog" aria-controls="routing-dialog" title="Provider routing">
+          <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>
+          <span id="routing-trigger-label">Balanced</span>
+          <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"></use></svg>
+        </button>
+        <button class="icon-btn topbar-tool" id="export-chat" type="button" aria-haspopup="dialog" aria-controls="export-dialog" title="Export chat" aria-label="Export chat">
+          <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
+        </button>
+        <button class="icon-btn topbar-tool" id="import-chat" type="button" title="Import chat" aria-label="Import chat">
+          <svg class="icon" aria-hidden="true"><use href="#i-upload"></use></svg>
+        </button>
+        <input type="file" id="import-chat-file" accept="application/json,.json" hidden>
+      </div>
+    </header>
+
+    <div class="notice" id="notice" role="status" hidden></div>
+
+    <div class="messages" id="messages"></div>
+
+    <div class="composer-wrap">
+      <div class="composer-toolbar">
+        <button class="tool-pill" id="tools-toggle" type="button" aria-pressed="true" title="Web search and fetch for this chat. Date/time and model search are always available. Search engines can charge per request.">
+          <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+          <span id="tools-toggle-label">Web tools on</span>
+        </button>
+        <label class="tool-cap" for="tool-cap" title="Maximum OpenRouter server-tool steps per reply (1–30).">Max calls
+          <input id="tool-cap" type="number" min="1" max="30" step="1" value="6" inputmode="numeric">
+        </label>
+        <div class="reasoning-menu" id="reasoning-menu">
+          <button class="tool-pill reasoning-trigger" id="reasoning-trigger" type="button" aria-haspopup="menu" aria-controls="reasoning-dropup" aria-expanded="false" title="Reasoning effort for this chat">
+            <svg class="icon" aria-hidden="true"><use href="#i-brain"></use></svg>
+            <span id="reasoning-trigger-label">Reasoning</span>
+            <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"></use></svg>
+          </button>
+          <div class="reasoning-dropup" id="reasoning-dropup" role="menu" aria-label="Reasoning effort" hidden></div>
+        </div>
+      </div>
+      <div class="composer-attachments" id="composer-attachments" hidden></div>
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="input" rows="1" placeholder="Message Clachan…" aria-label="Message" enterkeyhint="send"></textarea>
+        <div class="composer-actions">
+          <button class="icon-btn composer-tool" id="attach-file" type="button" aria-label="Attach image, PDF, or text file" title="Attach image, PDF, or text file">
+            <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
+          </button>
+          <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/*,.json,.go,.py,.js,.ts,.md,.csv,.yaml,.yml,.xml,.sql,.sh,.toml,.ini,.log,.c,.h,.cpp,.rs,.java,.rb,.php,.lua,.swift,.kt,.r,.cs,.scala,.vue,.svelte,.txt" multiple hidden>
+          <button class="icon-btn composer-tool" id="open-prompts" type="button" aria-haspopup="dialog" aria-controls="prompts-dialog" aria-label="Prompt library" title="Prompt library">
+            <svg class="icon" aria-hidden="true"><use href="#i-bookmark"></use></svg>
+          </button>
+          <button class="icon-btn send-btn" id="send" type="submit" aria-label="Send message">
+            <svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg>
+          </button>
+          <button class="icon-btn stop-btn" id="stop" type="button" aria-label="Stop generating" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-stop"></use></svg>
+          </button>
+        </div>
+      </form>
+      <p class="hint">Enter to send · Shift+Enter for a new line · Attach images, PDFs, or text files</p>
+    </div>
+  </main>
+</div>
+
+<dialog class="picker-dialog" id="model-dialog" aria-labelledby="model-dialog-title">
+  <div class="picker-body">
+    <header class="picker-head">
+      <div>
+        <h2 id="model-dialog-title">Choose a model</h2>
+        <p class="picker-sub" id="model-dialog-sub">OpenRouter catalogue</p>
+      </div>
+      <button class="icon-btn" type="button" data-close="model-dialog" aria-label="Close model picker">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="picker-search">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+      <input id="model-search" type="search" placeholder="Search models, authors, IDs…" autocomplete="off" spellcheck="false" aria-label="Search models">
+    </div>
+
+    <div class="picker-toolbar">
+      <div class="filter-chips" id="model-filters" role="group" aria-label="Filter models">
+        <button class="chip active" type="button" data-filter="all">All</button>
+        <button class="chip" type="button" data-filter="vision">Vision</button>
+        <button class="chip" type="button" data-filter="tools">Tools</button>
+        <button class="chip" type="button" data-filter="reasoning">Reasoning</button>
+      </div>
+      <label class="mini-field">
+        <span>Sort</span>
+        <select id="model-sort" class="mini-select" title="Price uses the sum of input and output per million tokens">
+          <option value="recommended">Recommended</option>
+          <option value="name-asc">Name A–Z</option>
+          <option value="name-desc">Name Z–A</option>
+          <option value="price-asc">Price (in+out): low → high</option>
+          <option value="price-desc">Price (in+out): high → low</option>
+          <option value="input-asc">Input price: low → high</option>
+          <option value="output-asc">Output price: low → high</option>
+          <option value="context-desc">Context: high → low</option>
+          <option value="context-asc">Context: low → high</option>
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="picker-list" id="model-list" role="listbox" aria-label="Models"></div>
+
+    <footer class="picker-foot">
+      <span class="muted" id="model-count"></span>
+      <button class="btn btn-quiet" id="model-routing-button" type="button">Provider routing</button>
+    </footer>
+  </div>
+</dialog>
+
+<dialog class="picker-dialog routing-dialog" id="routing-dialog" aria-labelledby="routing-dialog-title">
+  <div class="picker-body">
+    <header class="picker-head">
+      <div>
+        <h2 id="routing-dialog-title">Provider routing</h2>
+        <p class="picker-sub" id="routing-dialog-sub"></p>
+      </div>
+      <button class="icon-btn" type="button" data-close="routing-dialog" aria-label="Close routing">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="routing-options" id="routing-options">
+      <button class="route-option" type="button" data-mode="balanced">
+        <span class="route-title">Balanced</span>
+        <span class="route-desc">OpenRouter's default load balancing</span>
+      </button>
+      <button class="route-option" type="button" data-mode="price">
+        <span class="route-title">Cheapest</span>
+        <span class="route-desc">Lowest price first, then fallbacks</span>
+      </button>
+      <button class="route-option" type="button" data-mode="throughput">
+        <span class="route-title">Fastest</span>
+        <span class="route-desc">Highest tokens per second</span>
+      </button>
+      <button class="route-option" type="button" data-mode="latency">
+        <span class="route-title">Lowest latency</span>
+        <span class="route-desc">Quickest time to first token</span>
+      </button>
+      <button class="route-option" type="button" data-mode="specific">
+        <span class="route-title">Specific endpoint</span>
+        <span class="route-desc">Pin one provider, optionally without fallbacks</span>
+      </button>
+    </div>
+
+    <section class="endpoint-section" id="endpoint-section" hidden>
+      <div class="picker-toolbar">
+        <span class="field-label">Endpoints</span>
+        <label class="mini-field">
+          <span>Sort</span>
+          <select id="endpoint-sort" class="mini-select" title="Price uses the sum of input and output per million tokens">
+            <option value="recommended">Recommended</option>
+            <option value="price-asc">Price (in+out): low → high</option>
+            <option value="price-desc">Price (in+out): high → low</option>
+            <option value="throughput-desc">Throughput: high → low</option>
+            <option value="throughput-asc">Throughput: low → high</option>
+            <option value="latency-asc">Latency: low → high</option>
+            <option value="latency-desc">Latency: high → low</option>
+            <option value="context-desc">Context: high → low</option>
+            <option value="context-asc">Context: low → high</option>
+            <option value="name-asc">Name A–Z</option>
+            <option value="name-desc">Name Z–A</option>
+          </select>
+        </label>
+      </div>
+      <div class="picker-list endpoint-list" id="endpoint-list" role="listbox" aria-label="Provider endpoints"></div>
+      <label class="toggle-row">
+        <input type="checkbox" id="allow-fallbacks">
+        <span>Allow fallback providers if this one fails</span>
+      </label>
+    </section>
+
+    <footer class="picker-foot">
+      <span class="muted" id="routing-note">Applies to this conversation.</span>
+      <div class="picker-foot-actions">
+        <button class="btn btn-quiet" type="button" data-close="routing-dialog">Cancel</button>
+        <button class="btn btn-primary" type="button" id="routing-save">Save routing</button>
+      </div>
+    </footer>
+  </div>
+</dialog>
+
+<dialog class="picker-dialog prompt-dialog" id="prompts-dialog" aria-labelledby="prompts-title">
+  <div class="picker-body">
+    <header class="picker-head">
+      <div>
+        <h2 id="prompts-title">Prompt library</h2>
+        <p class="picker-sub" id="prompt-sub">Reusable prompts saved to this profile</p>
+      </div>
+      <button class="icon-btn" type="button" data-close="prompts-dialog" aria-label="Close prompt library">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="picker-search">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+      <input id="prompt-search" type="search" placeholder="Search prompts…" autocomplete="off" spellcheck="false" aria-label="Search prompts">
+    </div>
+
+    <div class="picker-toolbar">
+      <span class="muted" id="prompt-count"></span>
+      <button class="btn btn-quiet" id="prompt-new" type="button">New prompt</button>
+    </div>
+
+    <div class="prompt-list" id="prompt-list" role="list" aria-label="Saved prompts"></div>
+
+    <form class="prompt-form" id="prompt-form" hidden>
+      <label class="field">
+        <span class="field-label">Title</span>
+        <input id="prompt-title" type="text" maxlength="120" placeholder="Code reviewer" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field-label">Prompt</span>
+        <textarea id="prompt-body" rows="7" maxlength="16000" placeholder="You are a meticulous code reviewer…"></textarea>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="prompt-system">
+        <span>Show in system prompt presets</span>
+      </label>
+      <div class="prompt-form-actions">
+        <button class="btn btn-quiet" id="prompt-cancel" type="button">Cancel</button>
+        <button class="btn btn-primary" id="prompt-save" type="submit">Save prompt</button>
+      </div>
+    </form>
+
+    <footer class="picker-foot">
+      <span class="muted">Stored on this server, scoped to this profile.</span>
+      <button class="btn btn-quiet" type="button" data-close="prompts-dialog">Close</button>
+    </footer>
+  </div>
+</dialog>
+
+<dialog class="picker-dialog export-dialog" id="export-dialog" aria-labelledby="export-title">
+  <div class="picker-body">
+    <header class="picker-head">
+      <div>
+        <h2 id="export-title">Export chat</h2>
+        <p class="picker-sub" id="export-sub">Download a copy of this conversation</p>
+      </div>
+      <button class="icon-btn" type="button" data-close="export-dialog" aria-label="Close export">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="export-options">
+      <button class="export-option" type="button" data-export="markdown">
+        <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
+        <span class="export-main">
+          <span class="export-title">Markdown</span>
+          <span class="export-desc">Readable transcript with code fences</span>
+        </span>
+      </button>
+      <button class="export-option" type="button" data-export="json">
+        <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
+        <span class="export-main">
+          <span class="export-title">JSON</span>
+          <span class="export-desc">Full conversation record</span>
+        </span>
+      </button>
+      <button class="export-option" type="button" data-export="print">
+        <svg class="icon" aria-hidden="true"><use href="#i-print"></use></svg>
+        <span class="export-main">
+          <span class="export-title">Print / save as PDF</span>
+          <span class="export-desc">Use the browser's print dialog</span>
+        </span>
+      </button>
+    </div>
+
+    <footer class="picker-foot">
+      <span class="muted" id="export-note"></span>
+      <button class="btn btn-quiet" type="button" data-close="export-dialog">Cancel</button>
+    </footer>
+  </div>
+</dialog>
+
+<dialog class="picker-dialog file-viewer" id="file-viewer" aria-labelledby="file-viewer-title">
+  <div class="picker-body">
+    <header class="picker-head">
+      <div>
+        <h2 id="file-viewer-title">File</h2>
+        <p class="picker-sub" id="file-viewer-sub"></p>
+      </div>
+      <button class="icon-btn" type="button" data-close="file-viewer" aria-label="Close file viewer">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+    <pre class="file-raw"><code id="file-viewer-code"></code></pre>
+    <footer class="picker-foot">
+      <span class="muted" id="file-viewer-meta"></span>
+      <div class="picker-foot-actions">
+        <button class="btn btn-quiet" id="file-viewer-print" type="button">Print / PDF</button>
+        <button class="btn btn-primary" id="file-viewer-download" type="button">Download</button>
+        <button class="btn btn-quiet" type="button" data-close="file-viewer">Close</button>
+      </div>
+    </footer>
+  </div>
+</dialog>
+
+<dialog class="settings" id="settings" aria-labelledby="settings-title">
+  <form method="dialog" class="settings-body" id="settings-form">
+    <header class="settings-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="icon-btn" type="button" data-close="settings" aria-label="Close settings">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="settings-shell">
+      <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+        <button class="settings-tab active" type="button" role="tab" data-settings-tab="chat" aria-selected="true">Chat</button>
+        <button class="settings-tab" type="button" role="tab" data-settings-tab="persona" aria-selected="false">Persona</button>
+        <button class="settings-tab" type="button" role="tab" data-settings-tab="providers" aria-selected="false">Providers</button>
+        <button class="settings-tab" type="button" role="tab" data-settings-tab="appearance" aria-selected="false">Appearance</button>
+      </nav>
+
+      <div class="settings-panels">
+        <section class="settings-panel" data-settings-panel="chat" role="tabpanel">
+          <section class="field">
+            <h3 class="settings-section-title">Default model for new chats</h3>
+            <div class="setting-row">
+              <span class="setting-value" id="default-model-label">Last used model</span>
+              <div class="setting-actions">
+                <button class="btn" id="default-model-button" type="button">Change</button>
+                <button class="btn btn-quiet" id="default-model-clear" type="button" hidden>Clear</button>
+              </div>
+            </div>
+            <span class="field-help">Existing chats keep their own model.</span>
+          </section>
+
+          <section class="field">
+            <span class="field-label">This chat's system prompt</span>
+            <div class="preset-row">
+              <select id="system-preset" class="mini-select" aria-label="System prompt preset"></select>
+              <button class="btn btn-quiet" id="system-preset-save" type="button">Save as preset</button>
+            </div>
+            <textarea id="system-prompt" rows="7" placeholder="You are a helpful assistant."></textarea>
+            <span class="field-help">Only this conversation. Presets fill the box; press Save to keep changes.</span>
+          </section>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="persona" role="tabpanel" hidden>
+          <section class="settings-group">
+            <span class="settings-group-label">Assistant</span>
+            <label class="field">
+              <span class="field-label">Assistant name</span>
+              <input id="persona-name" type="text" maxlength="64" placeholder="Clachan" autocomplete="off" spellcheck="false">
+              <span class="field-help">Used on reply labels and sent as the assistant's name in the system prompt.</span>
+            </label>
+
+            <section class="field">
+              <span class="field-label">Default system prompt for new chats</span>
+              <div class="preset-row">
+                <select id="persona-preset" class="mini-select" aria-label="Default system prompt preset"></select>
+                <button class="btn btn-quiet" id="persona-preset-save" type="button">Save as preset</button>
+              </div>
+              <textarea id="persona-prompt" rows="6" placeholder="You are a thoughtful, concise assistant."></textarea>
+              <span class="field-help">Assistant instructions for new chats. Existing chats keep their own system prompt.</span>
+            </section>
+          </section>
+
+          <section class="settings-group">
+            <span class="settings-group-label">You</span>
+            <label class="field">
+              <span class="field-label">Your name</span>
+              <input id="user-name" type="text" maxlength="64" placeholder="Ada" autocomplete="off" spellcheck="false">
+              <span class="field-help">The name the assistant should use for you.</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">About you</span>
+              <textarea id="user-persona" rows="4" placeholder="Role, preferences, or project context…"></textarea>
+              <span class="field-help">Added to the system prompt for every chat, including existing ones.</span>
+            </label>
+          </section>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="providers" role="tabpanel" hidden>
+          <label class="field">
+            <span class="field-label">Ignored providers</span>
+            <span class="field-help">Use OpenRouter provider slugs, not the display names on the privacy page. For example, “Open Inference” is <code>open-inference</code> and “Sail Research” is <code>sail-research</code>. Slugs also appear as endpoint tags in Provider routing. Separate multiple values with commas; Clachan hides matching endpoints and asks OpenRouter to skip them.</span>
+            <input id="ignored-providers" type="text" maxlength="2000" placeholder="e.g. open-inference, sail-research, deepinfra/turbo" autocomplete="off" spellcheck="false">
+          </label>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="appearance" role="tabpanel" hidden>
+          <label class="field">
+            <span class="field-label">Theme</span>
+            <select id="theme">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+              <option value="midnight">Midnight</option>
+              <option value="midnight-purple">Midnight purple</option>
+              <option value="forest">Forest</option>
+              <option value="sepia">Sepia</option>
+            </select>
+          </label>
+        </section>
+      </div>
+    </div>
+
+    <footer class="settings-foot">
+      <span class="muted" id="settings-note"></span>
+      <button class="btn btn-primary" id="save-settings" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<section class="auth" id="auth" hidden>
+  <div class="auth-card">
+    <div class="auth-brand">
+      <span class="brand-mark" aria-hidden="true">C</span>
+      <span class="brand-name">Clachan</span>
+    </div>
+    <h1 id="auth-title">Sign in</h1>
+    <p class="auth-sub" id="auth-sub">Choose your profile.</p>
+
+    <form class="auth-form" id="auth-form">
+      <label class="auth-field" id="auth-profile-field">
+        <span>Profile</span>
+        <select id="auth-profile" autocomplete="username"></select>
+      </label>
+      <label class="auth-field" id="auth-name-field" hidden>
+        <span>Name</span>
+        <input id="auth-name" type="text" maxlength="64" autocomplete="username" spellcheck="false">
+      </label>
+      <label class="auth-field">
+        <span>Password</span>
+        <input id="auth-password" type="password" maxlength="200" autocomplete="current-password" required>
+      </label>
+      <label class="auth-field" id="auth-confirm-field" hidden>
+        <span>Confirm password</span>
+        <input id="auth-confirm" type="password" maxlength="200" autocomplete="new-password">
+      </label>
+      <p class="auth-error" id="auth-error" role="alert" hidden></p>
+      <button class="btn btn-primary auth-submit" id="auth-submit" type="submit">Sign in</button>
+    </form>
+
+    <p class="auth-help" id="auth-help">Chats are stored on this server.</p>
+  </div>
+</section>
+
+<dialog class="settings profiles-dialog" id="profiles" aria-labelledby="profiles-title">
+  <div class="settings-body">
+    <header class="settings-head">
+      <h2 id="profiles-title">Profiles</h2>
+      <button class="icon-btn" type="button" data-close="profiles" aria-label="Close profiles">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+
+    <div class="profile-identity">
+      <span class="avatar avatar-lg" id="profiles-avatar" aria-hidden="true">?</span>
+      <div>
+        <div class="profile-identity-name" id="profiles-current">—</div>
+        <div class="profile-identity-meta" id="profiles-owner-badge">Profile</div>
+      </div>
+    </div>
+
+    <section class="field">
+      <span class="field-label">Profiles on this server</span>
+      <ul class="profile-list" id="profiles-list"></ul>
+    </section>
+
+    <section class="field" id="add-profile-section" hidden>
+      <span class="field-label">Add a profile</span>
+      <span class="field-help">Sign in with it on another device to use that profile's chats.</span>
+      <form class="stack" id="add-profile-form">
+        <input id="new-profile-name" type="text" maxlength="64" placeholder="Name" autocomplete="off" spellcheck="false" required>
+        <input id="new-profile-password" type="password" maxlength="200" placeholder="Password (8+ characters)" autocomplete="new-password" required>
+        <input id="new-profile-confirm" type="password" maxlength="200" placeholder="Confirm password" autocomplete="new-password" required>
+        <button class="btn btn-primary" type="submit">Create profile</button>
+      </form>
+    </section>
+
+    <section class="field">
+      <span class="field-label">Change password</span>
+      <form class="stack" id="change-password-form">
+        <input id="current-password" type="password" maxlength="200" placeholder="Current password" autocomplete="current-password" required>
+        <input id="new-password" type="password" maxlength="200" placeholder="New password (8+ characters)" autocomplete="new-password" required>
+        <input id="confirm-password" type="password" maxlength="200" placeholder="Confirm new password" autocomplete="new-password" required>
+        <button class="btn" type="submit">Change password</button>
+      </form>
+    </section>
+
+    <footer class="settings-foot">
+      <span class="muted">Signed in on this device</span>
+      <button class="btn btn-quiet logout-btn" id="logout-btn" type="button">Log out</button>
+    </footer>
+  </div>
+</dialog>
+
+<div id="print-area" class="print-area" aria-hidden="true"></div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
