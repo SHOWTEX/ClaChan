@@ -11,10 +11,6 @@ history, a vanilla JavaScript interface, and OpenRouter behind the server.
 Profiles let your chats and settings follow you between devices. It is designed
 to run comfortably on a 1 GB Raspberry Pi 3B+.
 
-*Clachan* is a Gaelic word for a small settlement — a few houses, a shared
-place. That is the whole idea: a quiet chat app that lives on your network and
-answers to nobody else.
-
 ## Install
 
 Both installers download the latest release, verify its SHA-256 checksum, and
