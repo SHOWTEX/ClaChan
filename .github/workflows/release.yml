@@ -72,7 +72,7 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/$ASSET" .
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
