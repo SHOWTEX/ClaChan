@@ -119,12 +119,11 @@ esac
 [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "invalid port: $PORT"
 if [ "$MODE" = "uninstall" ] && [ "$PURGE" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
 	if [ -r /dev/tty ]; then
-		printf 'Remove the Clachan service and binary, keeping data? [y/N] ' >/dev/tty
+		printf 'Remove the Clachan service and binary, keeping data? [Y/n] ' >/dev/tty
 		answer=""
 		IFS= read -r answer < /dev/tty || true
 		case "$answer" in
-		y | Y | yes | YES) ;;
-		*) die "aborted" ;;
+		n | N | no | NO) die "aborted" ;;
 		esac
 	else
 		die "--yes is required when no terminal is available"

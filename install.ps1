@@ -262,15 +262,17 @@ if ($Uninstall) {
         return
     }
     if (-not $Yes) {
-        $prompt = if ($Purge) {
-            "Remove Clachan, its configuration, and its data? [y/N] "
+        if ($Purge) {
+            $answer = Read-Host "Remove Clachan, its configuration, and its data? [y/N] "
+            if ($answer -notmatch '^(?i:y|yes)$') {
+                return
+            }
         }
         else {
-            "Remove Clachan but keep its configuration and data? [y/N] "
-        }
-        $answer = Read-Host $prompt
-        if ($answer -notmatch '^(?i:y|yes)$') {
-            return
+            $answer = Read-Host "Remove Clachan but keep its configuration and data? [Y/n] "
+            if ($answer -match '^(?i:n|no)$') {
+                return
+            }
         }
     }
 
@@ -278,9 +280,11 @@ if ($Uninstall) {
     if (Test-Path -LiteralPath $Exe) {
         Stop-ClachanApp -ExePath $Exe
     }
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    }
+    Get-ScheduledTask -ErrorAction SilentlyContinue |
+        Where-Object { $_.TaskName -like "Clachan-*" } |
+        ForEach-Object {
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
     if (Test-Path -LiteralPath $ShortcutDir) {
         Remove-Item -LiteralPath $ShortcutDir -Recurse -Force -ErrorAction SilentlyContinue
     }
