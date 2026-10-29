@@ -76,7 +76,7 @@ On Linux or macOS:
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.4" -o clachan .
 ```
 
 CI runs the same formatting, vet, test, installer, and cross-compile checks on
@@ -90,8 +90,8 @@ writes `checksums.txt`, and publishes the GitHub release. Do not commit build
 output. To cut a release:
 
 ```bash
-git tag -a v1.0.3 -m "v1.0.3"
-git push origin v1.0.3
+git tag -a v1.0.4 -m "v1.0.4"
+git push origin v1.0.4
 ```
 
 ## Tests

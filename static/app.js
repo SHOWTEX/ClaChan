@@ -2976,8 +2976,8 @@
 
   async function prepareTextAttachment(file, mime) {
     if (!isTextMime(mime)) throw new Error("That is not a text file.");
-    if (file.size > 512 * 1024) {
-      throw new Error("Text files must be 512 KB or smaller.");
+    if (file.size > 4 * 1024 * 1024) {
+      throw new Error("Text files must be 4 MB or smaller.");
     }
 
     const bytes = new Uint8Array(await file.arrayBuffer());

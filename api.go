@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	maxJSONBody            = 64 << 10
-	maxPromptBytes         = 16 << 10
-	maxPromptTitle         = 120
+	maxJSONBody            = 2 << 20
+	maxPromptBytes         = 1 << 20
+	maxPromptTitle         = 200
 	maxImportBody          = 64 << 20
-	maxImportMessages      = 500
+	maxImportMessages      = 2000
 	maxImportAttachmentSum = 48 << 20
 )
 
@@ -811,14 +811,14 @@ func validatePrompt(title, body string) (string, string, error) {
 	if title == "" {
 		return "", "", errors.New("Give the prompt a title.")
 	}
-	if len(title) > maxPromptTitle {
+	if len([]rune(title)) > maxPromptTitle {
 		return "", "", fmt.Errorf("Prompt titles are limited to %d characters.", maxPromptTitle)
 	}
 	if strings.TrimSpace(body) == "" {
 		return "", "", errors.New("The prompt body cannot be empty.")
 	}
 	if len(body) > maxPromptBytes {
-		return "", "", fmt.Errorf("Prompts are limited to %d KB.", maxPromptBytes>>10)
+		return "", "", fmt.Errorf("Prompts are limited to %s.", byteLimitLabel(maxPromptBytes))
 	}
 	return title, body, nil
 }

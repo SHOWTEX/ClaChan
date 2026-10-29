@@ -17,7 +17,7 @@ import (
 
 const (
 	maxChatBody       = 40 << 20
-	maxMessageBytes   = 128 << 10
+	maxMessageBytes   = 1 << 20
 	idleStreamTimeout = 90 * time.Second
 	maxStreamDuration = 15 * time.Minute
 	defaultRetryAfter = 5

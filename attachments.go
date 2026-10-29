@@ -11,7 +11,7 @@ const (
 	maxAttachments         = 6
 	maxImageAttachmentSize = 8 << 20
 	maxPDFAttachmentSize   = 12 << 20
-	maxTextAttachmentSize  = 512 << 10
+	maxTextAttachmentSize  = 4 << 20
 	maxTotalAttachmentSize = 24 << 20
 	maxAttachmentNameRunes = 120
 )
@@ -126,19 +126,19 @@ func decodeAttachmentData(data, wantMIME string, limit int) (int, error) {
 	payload := data[comma+1:]
 	decodedLen := base64.StdEncoding.DecodedLen(len(payload))
 	if decodedLen > limit+2 {
-		return 0, fmt.Errorf("attachment is larger than %s", attachmentLimitLabel(limit))
+		return 0, fmt.Errorf("attachment is larger than %s", byteLimitLabel(limit))
 	}
 	decoded, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return 0, errors.New("attachment data is not valid base64")
 	}
 	if len(decoded) > limit {
-		return 0, fmt.Errorf("attachment is larger than %s", attachmentLimitLabel(limit))
+		return 0, fmt.Errorf("attachment is larger than %s", byteLimitLabel(limit))
 	}
 	return len(decoded), nil
 }
 
-func attachmentLimitLabel(limit int) string {
+func byteLimitLabel(limit int) string {
 	if limit >= 1<<20 {
 		return fmt.Sprintf("%d MB", limit>>20)
 	}

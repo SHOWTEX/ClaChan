@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.0.3-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -73,8 +73,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.0.3` (Linux) or
-`-Release v1.0.3` (Windows).
+To pin a version, download the installer and pass `--release v1.0.4` (Linux) or
+`-Release v1.0.4` (Windows).
 
 ## Uninstall
 
@@ -186,7 +186,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.0.4" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -195,7 +195,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.4" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -363,8 +363,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.0.3 -m "v1.0.3"
-git push origin v1.0.3
+git tag -a v1.0.4 -m "v1.0.4"
+git push origin v1.0.4
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
@@ -491,8 +491,9 @@ must send a request body and read the stream with `fetch`.
   describes the new capability instead of letting the model guess or claim
   access it does not have.
 - **Prompt library is per profile.** Prompts are stored in SQLite and scoped by
-  `profile_id`. “Insert” appends to the composer; “System” sets the current
-  conversation's system prompt. System presets are marked in the library.
+  `profile_id`. "Insert" appends to the composer; "System" sets the current
+  conversation's system prompt. System presets are marked in the library. Prompt
+  bodies can be up to 1 MB and titles up to 200 characters.
 - **Generated files stay in the browser.** Fenced code blocks become file cards
   with an inferred filename, language, size, raw-text viewer, and download.
   Downloads are browser Blobs. Print/save-as-PDF and conversation export also
@@ -502,14 +503,14 @@ must send a request body and read the stream with `fetch`.
   upload. PDFs are sent as Responses `input_file` parts with their filename and
   data URL. UTF-8 text and code files are validated in the browser and sent as
   text parts with their filename. Limits are 6 attachments, 8 MB per
-  image, 12 MB per PDF, 512 KB per text file, and 24 MB total. The validated data
+  image, 12 MB per PDF, 4 MB per text file, and 24 MB total. The validated data
   URLs are saved with the user message, so images and file cards reappear after
   reload; PDF output remains browser print/save-as-PDF.
 - **Import accepts JSON exports.** The import button reads either a full export
   envelope (`{"conversation": …}`) or a bare conversation object. The server
   assigns fresh conversation and message IDs, validates every attachment, and
   scopes the result to the signed-in profile. Reasoning, tool steps, citations,
-  and tool summaries are preserved. Imports are capped at 500 messages
+  and tool summaries are preserved. Imports are capped at 2,000 messages
   and 64 MB of JSON.
 - **Themes** are six named palettes selected in Settings and stored in browser
   local storage. Selecting one applies it immediately; Save is not required.
