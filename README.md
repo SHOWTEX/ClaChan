@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.0.4-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.0.5-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -73,8 +73,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.0.4` (Linux) or
-`-Release v1.0.4` (Windows).
+To pin a version, download the installer and pass `--release v1.0.5` (Linux) or
+`-Release v1.0.5` (Windows).
 
 ## Uninstall
 
@@ -186,7 +186,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.0.4" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.0.5" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -195,7 +195,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.4" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.5" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -363,8 +363,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.0.4 -m "v1.0.4"
-git push origin v1.0.4
+git tag -a v1.0.5 -m "v1.0.5"
+git push origin v1.0.5
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and

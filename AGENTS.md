@@ -4,7 +4,7 @@ Last updated: 2026-10-29
 
 - Repository: <https://github.com/SHOWTEX/ClaChan>
 - Default branch: `main`
-- Current release: `v1.0.4` (published)
+- Current release: `v1.0.5` (published)
 - Default port: `7654`
 - Default OpenRouter referer: `https://github.com/SHOWTEX/ClaChan`
 
@@ -103,7 +103,7 @@ It is designed for a 1 GB Raspberry Pi 3B+, but release builds also cover
 
 ## Current limits
 
-These are the limits after v1.0.4:
+These are the limits after v1.0.5:
 
 | Area | Limit |
 |---|---|
