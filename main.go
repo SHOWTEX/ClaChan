@@ -21,7 +21,7 @@ import (
 var staticFiles embed.FS
 
 // version is set at build time with -X main.version for tagged releases.
-var version = "1.0.0"
+var version = "1.0.1"
 
 const (
 	// maxStreams is a hard cap. A third concurrent generation is rejected with
