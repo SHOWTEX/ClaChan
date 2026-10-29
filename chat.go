@@ -259,7 +259,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "There is no reply to regenerate.", 0)
 			return
 		}
-		replaceID = history[len(history)-1].ID
+		last := history[len(history)-1]
+		// The client names the reply it is regenerating. If the conversation has
+		// moved on since that render (another tab), replacing the newest reply
+		// would answer a different question, so refuse instead.
+		if req.MessageID != "" && req.MessageID != last.ID {
+			writeError(w, http.StatusConflict, "conflict",
+				"That reply is no longer the latest message. Reload the conversation and try again.", 0)
+			return
+		}
+		replaceID = last.ID
 		history = history[:len(history)-1]
 	case "edit":
 		idx := -1
@@ -411,6 +420,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var completed *responsesResult
 	finishReason := ""
 	streamErr := ""
+	// A terminal upstream event ([DONE], response.completed, response.incomplete
+	// or response.failed). Without one, the stream was cut short.
+	terminalSeen := false
 	clientGone := false
 
 	var citations []Citation
@@ -464,6 +476,7 @@ read:
 
 			data, done := parseSSELine(line)
 			if done {
+				terminalSeen = true
 				break
 			}
 			if data == "" {
@@ -556,6 +569,7 @@ read:
 				}
 
 			case "response.completed":
+				terminalSeen = true
 				completed = event.Response
 				if completed == nil {
 					continue
@@ -575,6 +589,7 @@ read:
 				}
 
 			case "response.incomplete", "response.failed":
+				terminalSeen = true
 				if event.Response != nil {
 					capturedUsage = event.Response.Usage
 					if event.Response.Error != nil {
@@ -610,6 +625,12 @@ read:
 		clientGone = true
 	}
 	timedOut := !clientGone && !stalled.Load() && errors.Is(upCtx.Err(), context.DeadlineExceeded)
+	// A clean EOF from OpenRouter without any terminal event means the stream
+	// was truncated, not finished. Say so instead of presenting a partial reply
+	// as complete.
+	if !clientGone && !timedOut && !stalled.Load() && !terminalSeen && streamErr == "" {
+		streamErr = "The connection to OpenRouter closed before the reply finished."
+	}
 
 	indices := make([]int, 0, len(outputByIndex))
 	for index := range outputByIndex {

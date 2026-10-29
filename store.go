@@ -969,22 +969,36 @@ func (s *Store) deleteConversation(ctx context.Context, profileID, id string) er
 }
 
 func (s *Store) deleteMessage(ctx context.Context, profileID, id string) error {
-	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM messages
-		WHERE id = ? AND conversation_id IN (
-			SELECT id FROM conversations WHERE profile_id = ?
-		)`, id, profileID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	defer tx.Rollback()
+
+	var convID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT m.conversation_id
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE m.id = ? AND c.profile_id = ?`, id, profileID).Scan(&convID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM messages WHERE id = ? AND conversation_id = ?", id, convID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE conversations SET updated_at = ?
+		WHERE id = ? AND profile_id = ?`, nowMillis(), convID, profileID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // appendUserMessage inserts the user turn and updates the conversation in one

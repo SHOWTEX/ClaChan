@@ -1508,20 +1508,22 @@
     if (state.current && state.current.id) return state.current;
     if (!state.current) newChat({ focus: false });
 
-    const created = await api("/api/conversations", {
-      method: "POST",
-      body: {
-        provider: state.provider,
-        model: state.model,
-        systemPrompt: state.current.systemPrompt || "",
-        providerSort: state.providerSort,
-        providerOnly: state.providerOnly,
-        allowFallbacks: state.allowFallbacks,
-        toolsEnabled: state.toolsEnabled,
-        maxToolCalls: state.maxToolCalls,
-        reasoningEffort: activeReasoningEffort(),
-      },
-    });
+    // Omit an empty system prompt so the server can fall back to the profile
+    // persona and DEFAULT_SYSTEM_PROMPT. Sending "" would override both.
+    const request = {
+      provider: state.provider,
+      model: state.model,
+      providerSort: state.providerSort,
+      providerOnly: state.providerOnly,
+      allowFallbacks: state.allowFallbacks,
+      toolsEnabled: state.toolsEnabled,
+      maxToolCalls: state.maxToolCalls,
+      reasoningEffort: activeReasoningEffort(),
+    };
+    const systemPrompt = String(state.current.systemPrompt || "").trim();
+    if (systemPrompt) request.systemPrompt = systemPrompt;
+
+    const created = await api("/api/conversations", { method: "POST", body: request });
 
     state.current = {
       ...created,
@@ -1942,6 +1944,8 @@
     if (message.failed) article.append(failedNote(message));
     if (message.error) article.append(errorNote(message));
     if (message.stopped) article.append(el("p", "msg-note", "Stopped."));
+    const limit = finishNote(message);
+    if (limit) article.append(limit);
     if (!message.streaming && !message.failed) article.append(actionsBar(message));
 
     return article;
@@ -1968,7 +1972,7 @@
       const messages = (state.current && state.current.messages) || [];
       if (messages[messages.length - 1] === message) {
         const regenButton = iconButton("i-refresh", "Regenerate reply", "msg-action");
-        regenButton.addEventListener("click", regenerate);
+        regenButton.addEventListener("click", () => regenerate(message));
         bar.append(regenButton);
       }
       const remove = iconButton("i-trash", "Delete message", "msg-action");
@@ -1979,12 +1983,23 @@
     return bar;
   }
 
+  function finishNote(message) {
+    const reason = String(message.finishReason || "").toLowerCase();
+    if (reason === "max_output_tokens" || reason === "length" || reason === "incomplete") {
+      return el("p", "msg-note", "The reply hit the model's output limit and may be incomplete.");
+    }
+    if (reason === "content_filter") {
+      return el("p", "msg-note", "The model stopped early because of a content filter.");
+    }
+    return null;
+  }
+
   function errorNote(message) {
     const note = el("div", "msg-error");
     note.append(el("span", null, message.error.message || "The reply was interrupted."));
     const retry = el("button", "btn-small", "Try again");
     retry.type = "button";
-    retry.addEventListener("click", regenerate);
+    retry.addEventListener("click", () => regenerate(message));
     note.append(retry);
     return note;
   }
@@ -2167,12 +2182,17 @@
     });
   }
 
-  async function regenerate() {
+  async function regenerate(target) {
     if (state.streaming || !state.current || !state.current.id) return;
 
     const messages = state.current.messages;
     const last = messages[messages.length - 1];
     if (!last || last.role !== "assistant" || last.streaming) return;
+    // A retry button on an older reply must not regenerate a newer one.
+    if (target && target !== last) {
+      toast("Only the latest reply can be regenerated.");
+      return;
+    }
 
     clearRetry();
     const snapshot = messages.slice();
@@ -2183,7 +2203,7 @@
     state.pinned = true;
     renderMessages({ stick: true });
 
-    await streamInto(assistant, { action: "regenerate" }, {
+    await streamInto(assistant, { action: "regenerate", messageId: last.id }, {
       onPreMetaError(err) {
         if (state.current) state.current.messages = snapshot;
         toast(err.message);
@@ -2252,6 +2272,7 @@
     const controller = new AbortController();
     state.abort = controller;
     let gotMeta = false;
+    let gotDone = false;
 
     const requestBody = {
       conversationId: state.current.id,
@@ -2307,6 +2328,7 @@
             scheduleStructurePaint();
           }
         } else if (event.event === "done") {
+          gotDone = true;
           assistant.saved = event.data.saved !== false;
           assistant.finishReason = (event.data && event.data.finishReason) || "";
           if (event.data && typeof event.data.content === "string" && event.data.content) {
@@ -2333,7 +2355,14 @@
 
       assistant.streaming = false;
 
-      if (!assistant.content && !(assistant.steps || []).length) {
+      if (!gotDone) {
+        // The connection ended without a completion event: the reply is partial.
+        assistant.error = {
+          message: "The connection closed before the reply finished. The answer may be incomplete.",
+          code: "incomplete_stream",
+        };
+        if (handlers.onMidStreamError) handlers.onMidStreamError(new Error(assistant.error.message), assistant);
+      } else if (!assistant.content && !(assistant.steps || []).length) {
         removeMessage(assistant);
         toast("OpenRouter returned an empty reply.");
       } else if (assistant.saved === false) {

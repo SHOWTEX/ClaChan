@@ -125,6 +125,63 @@ func TestStoreConversationLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeleteMessageRefreshesConversationPreview(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	profile := createTestProfile(t, s, "Delete Owner", true)
+
+	conv, err := s.createConversation(ctx, profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+	if _, _, err := s.appendUserMessage(ctx, profile.ID, conv.ID, providerOpenRouter, "test/model", "keep me", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+	replyID := newID()
+	if err := s.saveAssistant(ctx, profile.ID, conv.ID, replyID, "temporary answer", "", nil, nil, nil, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	before, err := s.getConversation(ctx, profile.ID, conv.ID)
+	if err != nil {
+		t.Fatalf("getConversation: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE conversations SET updated_at = 1 WHERE id = ?", conv.ID); err != nil {
+		t.Fatalf("rewind updated_at: %v", err)
+	}
+
+	// A message in another profile's conversation cannot be deleted.
+	other := createTestProfile(t, s, "Delete Other", false)
+	if err := s.deleteMessage(ctx, other.ID, replyID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleteMessage from another profile = %v, want ErrNotFound", err)
+	}
+
+	if err := s.deleteMessage(ctx, profile.ID, replyID); err != nil {
+		t.Fatalf("deleteMessage: %v", err)
+	}
+
+	after, err := s.getConversation(ctx, profile.ID, conv.ID)
+	if err != nil {
+		t.Fatalf("getConversation after delete: %v", err)
+	}
+	if len(after.Messages) != 1 || after.Messages[0].ID == replyID {
+		t.Fatalf("after delete messages = %+v", after.Messages)
+	}
+	// Deleting must count as activity so the sidebar timestamp and preview move.
+	if after.UpdatedAt <= 1 || after.UpdatedAt < before.UpdatedAt {
+		t.Fatalf("updatedAt not refreshed: before %d, after %d", before.UpdatedAt, after.UpdatedAt)
+	}
+
+	list, err := s.listConversations(ctx, profile.ID)
+	if err != nil {
+		t.Fatalf("listConversations: %v", err)
+	}
+	if len(list) != 1 || list[0].MessageCount != 1 || strings.Contains(list[0].Preview, "temporary answer") {
+		t.Fatalf("list after delete = %+v", list)
+	}
+}
+
 func TestStorePersistsMessageAttachments(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

@@ -560,6 +560,69 @@ func TestChatRegenerateReplacesReply(t *testing.T) {
 	}
 }
 
+func TestChatRegenerateRejectsStaleMessageID(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be called for a stale regenerate")
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if _, _, err := env.s.store.appendUserMessage(ctx, env.profile.ID, conv.ID, providerOpenRouter, "test/model", "question", nil); err != nil {
+		t.Fatalf("append user: %v", err)
+	}
+	replyID := newID()
+	if err := env.s.store.saveAssistant(ctx, env.profile.ID, conv.ID, replyID, "latest reply", "", nil, nil, nil, false); err != nil {
+		t.Fatalf("save assistant: %v", err)
+	}
+
+	// Another tab appended a turn after this client rendered the reply.
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(
+		`{"conversationId":%q,"action":"regenerate","messageId":%q}`, conv.ID, "some-older-reply"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	saved, _ := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if len(saved.Messages) != 2 || saved.Messages[1].ID != replyID || saved.Messages[1].Content != "latest reply" {
+		t.Fatalf("messages changed: %+v", saved.Messages)
+	}
+}
+
+func TestChatDetectsTruncatedUpstreamStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		emitEvent(w, map[string]any{
+			"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "partial answer",
+		})
+		// Return without [DONE] or response.completed: the stream was cut short.
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(`{"conversationId":%q,"content":"hello"}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, "closed before the reply finished") {
+		t.Fatalf("expected an incomplete-stream error, body = %s", body)
+	}
+	if strings.Contains(body, "event: done") {
+		t.Fatalf("truncated stream must not report done, body = %s", body)
+	}
+
+	// The partial text is still persisted so it is not lost.
+	saved, _ := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if len(saved.Messages) != 2 || saved.Messages[1].Content != "partial answer" {
+		t.Fatalf("saved messages = %+v", saved.Messages)
+	}
+}
+
 func TestChatEditTruncatesAndResends(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		emitTextResponse(w, "answer to edited", []string{"answer to edited"})
