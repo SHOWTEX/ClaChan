@@ -48,6 +48,6 @@ publishing details.
 
 - Run the server as an unprivileged system user.
 - Keep `.env` readable only by that user (or root plus the service group).
-- Restrict the listen address or firewall port 8080 to your LAN.
+- Restrict the listen address or firewall port 7654 to your LAN.
 - Back up the SQLite database and keep backups private.
 - Rotate `OPENROUTER_API_KEY` if it is ever exposed.

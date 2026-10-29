@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.0.2-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.0.3-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create
 
 ### First run
 
-Open `http://<server-address>:8080` on Linux, or <http://localhost:8080> on
+Open `http://<server-address>:7654` on Linux, or <http://localhost:7654> on
 Windows. The first visit creates the owner profile. No accounts, conversations,
 custom presets, or API keys are shipped with the repository.
 
@@ -73,8 +73,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.0.2` (Linux) or
-`-Release v1.0.2` (Windows).
+To pin a version, download the installer and pass `--release v1.0.3` (Linux) or
+`-Release v1.0.3` (Windows).
 
 ## Uninstall
 
@@ -186,7 +186,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.0.2" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -195,7 +195,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.2" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -214,7 +214,7 @@ cp .env.example .env
 go run .
 ```
 
-Open <http://localhost:8080>. The first visit creates the owner profile.
+Open <http://localhost:7654>. The first visit creates the owner profile.
 
 For a disposable development database, point `CLACHAN_DB` at a temporary file:
 
@@ -262,7 +262,7 @@ purge.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | *(empty)* | Required. Server-side only; never sent to the browser. |
-| `CLACHAN_ADDR` | `:8080` | Listen address. Use `:8080` for LAN access. |
+| `CLACHAN_ADDR` | `:7654` | Listen address. Use `:7654` for LAN access. |
 | `CLACHAN_DB` | `./data/clachan.db` | SQLite file. Its parent directory is created if missing. |
 | `DEFAULT_MODEL` | `deepseek/deepseek-v4.1-flash-1017` | Model for new conversations. |
 | `DEFAULT_SYSTEM_PROMPT` | *(empty)* | Seeded into new conversations. |
@@ -339,7 +339,7 @@ sudo systemctl enable --now clachan
 sudo systemctl status clachan
 ```
 
-Then open `http://<pi-address>:8080` from any device on the LAN.
+Then open `http://<pi-address>:7654` from any device on the LAN.
 
 The first visit asks you to create the **owner** profile. The owner can add more
 profiles from the profile chip at the bottom of the sidebar. Each profile has its
@@ -363,8 +363,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.0.2 -m "v1.0.2"
-git push origin v1.0.2
+git tag -a v1.0.3 -m "v1.0.3"
+git push origin v1.0.3
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
@@ -535,9 +535,9 @@ must send a request body and read the stream with `fetch`.
   Clachan** and **Clachan** shortcuts after editing `.env`.
 - **Port already in use:** change `CLACHAN_ADDR` in the config file and restart
   the service (Linux) or use Stop/Open Clachan (Windows).
-- **Another device cannot connect:** allow TCP 8080 on the private network in
-  the firewall, and confirm the server is bound to `:8080` rather than
-  `127.0.0.1:8080`.
+- **Another device cannot connect:** allow TCP 7654 on the private network in
+  the firewall, and confirm the server is bound to `:7654` rather than
+  `127.0.0.1:7654`.
 - **Update checksum failure:** retry the download. Do not bypass checksum
   verification; a partial or tampered asset should not be installed.
 

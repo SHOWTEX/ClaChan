@@ -20,7 +20,7 @@ type Config struct {
 }
 
 const (
-	defaultAddr   = ":8080"
+	defaultAddr   = ":7654"
 	defaultDBPath = "data/clachan.db"
 	defaultBase   = "https://openrouter.ai/api/v1"
 	defaultModel  = "deepseek/deepseek-v4.1-flash-1017"

@@ -25,7 +25,7 @@ Copy-Item .env.example .env
 go run .
 ```
 
-Open <http://localhost:8080>. The first visit creates the owner profile. If you
+Open <http://localhost:7654>. The first visit creates the owner profile. If you
 want to keep your normal database untouched, point `CLACHAN_DB` at a temporary
 file:
 
@@ -76,7 +76,7 @@ On Linux or macOS:
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.2" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.3" -o clachan .
 ```
 
 CI runs the same formatting, vet, test, installer, and cross-compile checks on
@@ -90,8 +90,8 @@ writes `checksums.txt`, and publishes the GitHub release. Do not commit build
 output. To cut a release:
 
 ```bash
-git tag -a v1.0.2 -m "v1.0.2"
-git push origin v1.0.2
+git tag -a v1.0.3 -m "v1.0.3"
+git push origin v1.0.3
 ```
 
 ## Tests

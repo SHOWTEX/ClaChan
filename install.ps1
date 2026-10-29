@@ -51,7 +51,7 @@ Options:
   -Yes              Answer yes to confirmation prompts.
   -Repo OWNER/REPO  GitHub repository to download from.
   -Release VERSION  Release tag to install (default: latest).
-  -Port PORT        Port for a new configuration (default: 8080).
+  -Port PORT        Port for a new configuration (default: 7654).
   -InstallDir PATH  Install directory (default: %LOCALAPPDATA%\Clachan).
   -Help             Show this help.
 
@@ -144,7 +144,7 @@ function Set-EnvValue {
 function Get-Port {
     param([string]$Value)
     if (-not $Value) {
-        return 8080
+        return 7654
     }
     $number = 0
     if (-not [int]::TryParse($Value, [ref]$number) -or $number -lt 1 -or $number -gt 65535) {
@@ -159,7 +159,7 @@ function Get-InstalledPort {
     if ($addr -match ':(\d+)\s*$') {
         return [int]$Matches[1]
     }
-    return 8080
+    return 7654
 }
 
 function Stop-ClachanApp {
@@ -390,11 +390,43 @@ try {
     }
     $appVersion = ($versionText -split '\s+')[-1].TrimStart('v')
 
+    if ($installed) {
+        Stop-ClachanApp -ExePath $Exe
+    }
+
+    $configExists = Test-Path -LiteralPath $EnvFile
+    $portNumber = if ($configExists) {
+        Get-InstalledPort -Path $EnvFile
+    }
+    elseif ($Port) {
+        Get-Port -Value $Port
+    }
+    else {
+        7654
+    }
+
+    if (-not $NoStart) {
+        $listener = $null
+        try {
+            $listener = @(Get-NetTCPConnection -State Listen -LocalPort $portNumber -ErrorAction SilentlyContinue) |
+                Select-Object -First 1
+        }
+        catch {
+            # The cmdlet is unavailable on very old Windows builds.
+        }
+        if ($listener) {
+            if ($configExists) {
+                Fail "port $portNumber is already in use. Stop the conflicting service or change CLACHAN_ADDR in $EnvFile."
+            }
+            Fail "port $portNumber is already in use. Stop the conflicting service or choose another port with -Port."
+        }
+    }
+
     New-Item -ItemType Directory -Path $InstallDir, $DataDir, $LogDir -Force | Out-Null
 
     if (-not (Test-Path -LiteralPath $EnvFile)) {
         Write-Step "Creating $EnvFile"
-        $configPort = if ($Port) { Get-Port -Value $Port } else { 8080 }
+        $configPort = if ($Port) { Get-Port -Value $Port } else { 7654 }
         $config = @(
             "# Clachan configuration. Edit this file, then restart Clachan.",
             "OPENROUTER_API_KEY=",
@@ -439,7 +471,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 & (Join-Path $root "run-clachan.ps1")
 $envFile = Join-Path $root ".env"
-$port = 8080
+$port = 7654
 $line = @(Get-Content -LiteralPath $envFile -ErrorAction SilentlyContinue) |
     Where-Object { $_.StartsWith("CLACHAN_ADDR=", [StringComparison]::Ordinal) } |
     Select-Object -Last 1
@@ -481,7 +513,6 @@ Get-CimInstance Win32_Process -Filter "Name = 'clachan.exe'" -ErrorAction Silent
     }
 
     Write-Step "Installing $versionText"
-    Stop-ClachanApp -ExePath $Exe
     $newExe = "$Exe.new"
     Copy-Item -LiteralPath $download -Destination $newExe -Force
     for ($i = 0; $i -lt 20; $i++) {
@@ -561,7 +592,6 @@ Get-CimInstance Win32_Process -Filter "Name = 'clachan.exe'" -ErrorAction Silent
         }
     }
 
-    $portNumber = Get-InstalledPort -Path $EnvFile
     if (-not $NoStart) {
         Write-Step "Starting Clachan"
         if (-not $NoTask) {

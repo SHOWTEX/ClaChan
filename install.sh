@@ -19,7 +19,7 @@ DATA_DIR="${CLACHAN_DATA_DIR:-$PREFIX/data}"
 SERVICE_NAME="${CLACHAN_SERVICE:-clachan}"
 SERVICE_USER="${CLACHAN_USER:-clachan}"
 RELEASE="${CLACHAN_RELEASE:-latest}"
-PORT="${CLACHAN_PORT:-8080}"
+PORT="${CLACHAN_PORT:-7654}"
 
 MODE="install"
 NO_START=0
@@ -41,7 +41,7 @@ Options:
   --yes, -y            Answer yes to confirmation prompts.
   --repo OWNER/REPO    GitHub repository to download from.
   --release VERSION    Release tag to install (default: latest).
-  --port PORT           Port for a new configuration (default: 8080).
+  --port PORT           Port for a new configuration (default: 7654).
   -h, --help           Show this help.
 
 Environment:
@@ -184,6 +184,19 @@ else
 	die "missing sha256sum or shasum"
 fi
 
+port_in_use() {
+	local port="$1"
+	if command -v ss >/dev/null 2>&1; then
+		ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
+		return $?
+	fi
+	if command -v lsof >/dev/null 2>&1; then
+		lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+		return $?
+	fi
+	return 1
+}
+
 case "$REPO" in
 */*) ;;
 *) die "repository must look like OWNER/REPO; pass --repo OWNER/REPO" ;;
@@ -239,6 +252,35 @@ fi
 if [ "$MODE" = "install" ] && [ "$installed" -eq 1 ]; then
 	printf '==> Existing installation found; updating\n'
 	MODE="update"
+fi
+
+if [ -f "$SERVICE_FILE" ]; then
+	printf '==> Stopping existing service\n'
+	systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+	systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+fi
+
+PORT_NOW="$PORT"
+ADDR_LINE="$(grep -E '^CLACHAN_ADDR=' "$CONFIG_FILE" 2>/dev/null | tail -n 1 || true)"
+if [ -n "$ADDR_LINE" ]; then
+	ADDR="${ADDR_LINE#CLACHAN_ADDR=}"
+	case "$ADDR" in
+	:*) PORT_NOW="${ADDR#:}" ;;
+	*:*) PORT_NOW="${ADDR##*:}" ;;
+	esac
+fi
+
+if [ "$NO_START" -eq 0 ] && port_in_use "$PORT_NOW"; then
+	printf '==> Port %s is already in use:\n' "$PORT_NOW" >&2
+	if command -v ss >/dev/null 2>&1; then
+		ss -ltnp "sport = :$PORT_NOW" >&2 || true
+	elif command -v lsof >/dev/null 2>&1; then
+		lsof -nP -iTCP:"$PORT_NOW" -sTCP:LISTEN >&2 || true
+	fi
+	if [ -f "$CONFIG_FILE" ]; then
+		die "stop the conflicting service or change CLACHAN_ADDR in $CONFIG_FILE"
+	fi
+	die "stop the conflicting service or re-run with --port <free-port>"
 fi
 
 printf '==> Preparing service user and directories\n'
@@ -300,6 +342,8 @@ else
 Description=Clachan
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -323,17 +367,8 @@ EOF
 fi
 systemctl daemon-reload
 
-PORT_NOW="$PORT"
-ADDR_LINE="$(grep -E '^CLACHAN_ADDR=' "$CONFIG_FILE" | tail -n 1 || true)"
-if [ -n "$ADDR_LINE" ]; then
-	ADDR="${ADDR_LINE#CLACHAN_ADDR=}"
-	case "$ADDR" in
-	:*) PORT_NOW="${ADDR#:}" ;;
-	*:*) PORT_NOW="${ADDR##*:}" ;;
-	esac
-fi
-
 if [ "$NO_START" -eq 0 ]; then
+	systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
 	printf '==> Starting service\n'
 	systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
 	systemctl restart "$SERVICE_NAME"
