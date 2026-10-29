@@ -24,5 +24,19 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Local agent/tool configuration
+# Local agent/tool configuration and handoff notes
+AGENTS.md
+CLAUDE.md
+GEMINI.md
 opencode.jsonc
+.opencode/
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.windsurfrules
+.aider*
+.continue/
+.roo/
+.gemini/
+.mcp.json
