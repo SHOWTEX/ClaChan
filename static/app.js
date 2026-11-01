@@ -1936,6 +1936,9 @@
           body.append(el("span", "caret"));
         }
         article.append(body);
+        if (!message.content && message.reasoning && !message.streaming) {
+          article.append(el("p", "msg-note", "The model returned reasoning but no answer text."));
+        }
         const extras = assistantExtras(message);
         if (extras) article.append(extras);
       }
@@ -1992,6 +1995,17 @@
       return el("p", "msg-note", "The model stopped early because of a content filter.");
     }
     return null;
+  }
+
+  function emptyReplyMessage(reason) {
+    const value = String(reason || "").toLowerCase();
+    if (value === "max_output_tokens" || value === "length" || value === "incomplete") {
+      return "OpenRouter returned no answer text: the model hit its output limit.";
+    }
+    if (value === "content_filter") {
+      return "OpenRouter returned no answer text: the model stopped on a content filter.";
+    }
+    return "OpenRouter returned an empty reply.";
   }
 
   function errorNote(message) {
@@ -2362,9 +2376,9 @@
           code: "incomplete_stream",
         };
         if (handlers.onMidStreamError) handlers.onMidStreamError(new Error(assistant.error.message), assistant);
-      } else if (!assistant.content && !(assistant.steps || []).length) {
+      } else if (!assistant.content && !(assistant.steps || []).length && !assistant.reasoning) {
         removeMessage(assistant);
-        toast("OpenRouter returned an empty reply.");
+        toast(emptyReplyMessage(assistant.finishReason));
       } else if (assistant.saved === false) {
         toast("The reply streamed but could not be saved.");
       }

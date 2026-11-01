@@ -623,6 +623,134 @@ func TestChatDetectsTruncatedUpstreamStream(t *testing.T) {
 	}
 }
 
+// A buffered upstream can deliver the answer only in terminal events, with no
+// incremental deltas. That reply must not be treated as empty.
+func TestChatRecoversTextFromTerminalEvents(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		emitEvent(w, map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": 0,
+			"item": map[string]any{
+				"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{},
+			},
+		})
+		emitEvent(w, map[string]any{
+			"type": "response.content_part.done", "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": `{"ok":true}`},
+		})
+		emitEvent(w, map[string]any{
+			"type": "response.output_text.done", "output_index": 0, "content_index": 0, "text": `{"ok":true}`,
+		})
+		item := messageItem(`{"ok":true}`)
+		emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+		emitEvent(w, completedEvent([]any{item}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(`{"conversationId":%q,"content":"parse this"}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: done") || !strings.Contains(body, `"saved":true`) {
+		t.Fatalf("expected a saved done event, body = %s", body)
+	}
+	if !strings.Contains(body, `\"ok\":true`) {
+		t.Fatalf("done event lost the reply text, body = %s", body)
+	}
+
+	saved, _ := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if len(saved.Messages) != 2 || saved.Messages[1].Content != `{"ok":true}` {
+		t.Fatalf("saved messages = %+v", saved.Messages)
+	}
+}
+
+// Some Responses implementations put the answer in a top-level output_text
+// field and leave output empty.
+func TestChatRecoversTopLevelOutputText(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		completed := completedEvent(nil)
+		completed["response"].(map[string]any)["output_text"] = "finished in the completed event"
+		emitEvent(w, completed)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(`{"conversationId":%q,"content":"hello"}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "finished in the completed event") || !strings.Contains(body, `"saved":true`) {
+		t.Fatalf("top-level output_text was lost, body = %s", body)
+	}
+}
+
+// A reasoning-only reply used to be deleted with an "empty reply" toast even
+// though the provider had generated (and logged) content.
+func TestChatKeepsReasoningOnlyReply(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		reasoning := map[string]any{
+			"id":     "rs_1",
+			"type":   "reasoning",
+			"status": "completed",
+			"summary": []any{
+				map[string]any{"type": "summary_text", "text": "Only thinking."},
+			},
+		}
+		emitEvent(w, map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": 0,
+			"item":         map[string]any{"id": "rs_1", "type": "reasoning", "status": "in_progress", "summary": []any{}},
+		})
+		emitEvent(w, map[string]any{
+			"type": "response.reasoning_summary_text.delta", "output_index": 0, "summary_index": 0, "delta": "Only thinking.",
+		})
+		emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoning})
+		completed := completedEvent([]any{reasoning})
+		completed["response"].(map[string]any)["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+		emitEvent(w, completed)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID, providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(`{"conversationId":%q,"content":"think hard"}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: done") || !strings.Contains(body, `"saved":true`) {
+		t.Fatalf("reasoning-only reply must still complete and save, body = %s", body)
+	}
+	if !strings.Contains(body, `"reasoning":"Only thinking."`) || !strings.Contains(body, `"finishReason":"max_output_tokens"`) {
+		t.Fatalf("done event lost the reasoning or finish reason, body = %s", body)
+	}
+	if strings.Contains(body, `"content":`) {
+		t.Fatalf("reasoning-only reply must not invent content, body = %s", body)
+	}
+
+	saved, _ := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if len(saved.Messages) != 2 || saved.Messages[1].Content != "" || saved.Messages[1].Reasoning != "Only thinking." {
+		t.Fatalf("saved messages = %+v", saved.Messages)
+	}
+}
+
 func TestChatEditTruncatesAndResends(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		emitTextResponse(w, "answer to edited", []string{"answer to edited"})

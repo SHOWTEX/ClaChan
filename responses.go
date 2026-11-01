@@ -22,8 +22,9 @@ type responseAction struct {
 }
 
 type responseText struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Refusal string `json:"refusal"`
 }
 
 type responseItem struct {
@@ -41,13 +42,17 @@ type responseItem struct {
 	Arguments  string          `json:"arguments"`
 	DateTime   string          `json:"datetime"`
 	Timezone   string          `json:"timezone"`
+	Refusal    string          `json:"refusal"`
 	Error      string          `json:"error"`
 }
 
 type responsesResult struct {
-	ID                string         `json:"id"`
-	Status            string         `json:"status"`
-	Model             string         `json:"model"`
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Model  string `json:"model"`
+	// OutputText is a convenience field some Responses implementations return
+	// instead of (or in addition to) output items. Use it as a last resort.
+	OutputText        string         `json:"output_text"`
 	Output            []responseItem `json:"output"`
 	Usage             *usage         `json:"usage"`
 	IncompleteDetails *struct {
@@ -68,6 +73,8 @@ type responsesEvent struct {
 	SequenceNumber int              `json:"sequence_number"`
 	Delta          string           `json:"delta"`
 	Text           string           `json:"text"`
+	Refusal        string           `json:"refusal"`
+	Part           *responseText    `json:"part"`
 	Item           *responseItem    `json:"item"`
 	Annotation     *annotation      `json:"annotation"`
 	Response       *responsesResult `json:"response"`
@@ -95,6 +102,16 @@ func (item *responseItem) reasoningText() string {
 }
 
 func (item *responseItem) contentText() string {
+	if item == nil {
+		return ""
+	}
+	if text := item.partText(); text != "" {
+		return text
+	}
+	return strings.TrimSpace(item.Refusal)
+}
+
+func (item *responseItem) partText() string {
 	if item == nil || len(item.Content) == 0 {
 		return ""
 	}
@@ -106,8 +123,11 @@ func (item *responseItem) contentText() string {
 	if err := json.Unmarshal(item.Content, &parts); err == nil {
 		chunks := make([]string, 0, len(parts))
 		for _, part := range parts {
-			if part.Text != "" {
+			switch {
+			case part.Text != "":
 				chunks = append(chunks, part.Text)
+			case part.Refusal != "":
+				chunks = append(chunks, part.Refusal)
 			}
 		}
 		return strings.TrimSpace(strings.Join(chunks, ""))
@@ -116,27 +136,13 @@ func (item *responseItem) contentText() string {
 }
 
 func (item *responseItem) messageText() string {
-	if item == nil || len(item.Content) == 0 {
+	if item == nil {
 		return ""
 	}
-	var text string
-	if err := json.Unmarshal(item.Content, &text); err == nil {
+	if text := item.partText(); text != "" {
 		return text
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(item.Content, &parts); err == nil {
-		chunks := make([]string, 0, len(parts))
-		for _, part := range parts {
-			if part.Type == "output_text" || part.Type == "text" {
-				chunks = append(chunks, part.Text)
-			}
-		}
-		return strings.Join(chunks, "")
-	}
-	return ""
+	return item.Refusal
 }
 
 func isResponseToolType(value string) bool {
@@ -454,9 +460,34 @@ func attachUnmatchedCitations(steps []ChatStep, citations []Citation) {
 
 func lastResponseMessageText(output []responseItem) string {
 	for i := len(output) - 1; i >= 0; i-- {
-		if output[i].Type == "message" {
-			return output[i].messageText()
+		item := &output[i]
+		if item.Type == "reasoning" || isResponseToolType(item.Type) {
+			continue
+		}
+		// Do not require type "message": some upstreams label the final item
+		// differently, and the text is worth keeping either way.
+		if text := item.messageText(); text != "" {
+			return text
 		}
 	}
 	return ""
+}
+
+// stringField pulls a single string field out of an event payload. It is used
+// as a fallback when decoding the full event shape fails because one unrelated
+// field had an unexpected JSON type; a stray field must never discard the text.
+func stringField(data, key string) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(data), &fields); err != nil {
+		return ""
+	}
+	raw, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }

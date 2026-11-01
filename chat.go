@@ -416,10 +416,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var content strings.Builder
+	// Buffered providers can deliver the answer only in terminal events
+	// (output_text.done, content_part.done) instead of incremental deltas.
+	var doneText string
 	var capturedUsage *usage
 	var completed *responsesResult
 	finishReason := ""
 	streamErr := ""
+	eventCounts := make(map[string]int)
+	decodeErrors := 0
 	// A terminal upstream event ([DONE], response.completed, response.incomplete
 	// or response.failed). Without one, the stream was cut short.
 	terminalSeen := false
@@ -483,9 +488,27 @@ read:
 				continue
 			}
 
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal([]byte(data), &envelope); err != nil || envelope.Type == "" {
+				decodeErrors++
+				continue
+			}
+			eventCounts[envelope.Type]++
+
 			var event responsesEvent
 			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
+				// One unexpected field type must not throw away an entire text
+				// delta, so keep the fields that matter and carry on.
+				decodeErrors++
+				event = responsesEvent{
+					Type:    envelope.Type,
+					Delta:   stringField(data, "delta"),
+					Text:    stringField(data, "text"),
+					Refusal: stringField(data, "refusal"),
+					ItemID:  stringField(data, "item_id"),
+				}
 			}
 
 			switch event.Type {
@@ -557,6 +580,35 @@ read:
 				content.WriteString(event.Delta)
 				if !send("delta", deltaEvent{Text: event.Delta}) {
 					break read
+				}
+
+			case "response.refusal.delta":
+				if event.Delta == "" {
+					continue
+				}
+				content.WriteString(event.Delta)
+				if !send("delta", deltaEvent{Text: event.Delta}) {
+					break read
+				}
+
+			case "response.output_text.done":
+				if event.Text != "" {
+					doneText = event.Text
+				}
+
+			case "response.refusal.done":
+				if event.Refusal != "" {
+					doneText = event.Refusal
+				}
+
+			case "response.content_part.done":
+				if event.Part != nil {
+					switch {
+					case event.Part.Text != "":
+						doneText = event.Part.Text
+					case event.Part.Refusal != "":
+						doneText = event.Part.Refusal
+					}
 				}
 
 			case "response.output_text.annotation.added":
@@ -646,13 +698,21 @@ read:
 	if final := lastResponseMessageText(orderedOutput); final != "" {
 		text = final
 	}
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(doneText) != "" {
+		text = doneText
+	}
+	if strings.TrimSpace(text) == "" && completed != nil && strings.TrimSpace(completed.OutputText) != "" {
+		text = completed.OutputText
+	}
 	steps, finalReasoning := buildResponseTranscript(orderedOutput, reasoningByIndex, citations)
 	if len(steps) == 0 && len(streamedSteps) > 0 {
 		steps = streamedSteps
 	}
 	toolRun := buildToolRun(toolsEnabled, toolCalls, capturedUsage, activitiesFromSteps(steps))
 	saved := false
-	if text != "" || len(steps) > 0 {
+	// A reasoning-only reply is still a real reply; keep it instead of discarding
+	// it and telling the user that OpenRouter returned nothing.
+	if text != "" || len(steps) > 0 || finalReasoning != "" {
 		saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.store.saveAssistant(saveCtx, profile.ID, conv.ID, assistantID,
 			text, finalReasoning, steps, citations, toolRun, replaced); err != nil {
@@ -668,10 +728,24 @@ read:
 		"conversation", conv.ID,
 		"model", model,
 		"chars", len(text),
+		"reasoningChars", len(finalReasoning),
 		"finish", finishReason,
 		"streamed", !clientGone,
 		"elapsed", elapsed.String(),
+		"events", eventSummary(eventCounts),
+		"decodeErrors", decodeErrors,
 	)
+	if text == "" && len(steps) == 0 {
+		// Nothing renderable came back. The event histogram above is what makes
+		// this diagnosable from the server log after the fact.
+		s.log.Warn("reply had no text",
+			"conversation", conv.ID,
+			"model", model,
+			"finish", finishReason,
+			"reasoningChars", len(finalReasoning),
+			"events", eventSummary(eventCounts),
+		)
+	}
 
 	if clientGone {
 		return
@@ -817,6 +891,23 @@ func parseSSELine(line string) (data string, done bool) {
 		return "", true
 	}
 	return payload, false
+}
+
+// eventSummary renders an SSE event histogram as a single bounded log field.
+func eventSummary(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s=%d", name, counts[name]))
+	}
+	return truncate(strings.Join(parts, " "), 600)
 }
 
 func parseRetryAfter(value string) int {
