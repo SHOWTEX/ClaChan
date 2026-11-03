@@ -111,12 +111,12 @@
     <div class="messages" id="messages"></div>
 
     <div class="composer-wrap">
-      <div class="composer-toolbar">
+      <div class="composer-toolbar" id="composer-toolbar">
         <button class="tool-pill" id="tools-toggle" type="button" aria-pressed="true" title="Web search and fetch for this chat. Date/time and model search are always available. Search engines can charge per request.">
           <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
           <span id="tools-toggle-label">Web tools on</span>
         </button>
-        <label class="tool-cap" for="tool-cap" title="Maximum OpenRouter server-tool steps per reply (1–30).">Max calls
+        <label class="tool-cap" id="tool-cap-field" for="tool-cap" title="Maximum OpenRouter server-tool steps per reply (1–30).">Max calls
           <input id="tool-cap" type="number" min="1" max="30" step="1" value="6" inputmode="numeric">
         </label>
         <div class="reasoning-menu" id="reasoning-menu">
@@ -147,7 +147,7 @@
           </button>
         </div>
       </form>
-      <p class="hint">Enter to send · Shift+Enter for a new line · Attach images, PDFs, or text files</p>
+      <p class="hint" id="composer-hint">Enter to send · Shift+Enter for a new line · Attach images, PDFs, or text files</p>
     </div>
   </main>
 </div>
@@ -164,12 +164,14 @@
       </button>
     </header>
 
+    <div class="backend-tabs" id="backend-tabs" role="tablist" aria-label="Backend"></div>
+
     <div class="picker-search">
       <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
       <input id="model-search" type="search" placeholder="Search models, authors, IDs…" autocomplete="off" spellcheck="false" aria-label="Search models">
     </div>
 
-    <div class="picker-toolbar">
+    <div class="picker-toolbar" id="model-toolbar">
       <div class="filter-chips" id="model-filters" role="group" aria-label="Filter models">
         <button class="chip active" type="button" data-filter="all">All</button>
         <button class="chip" type="button" data-filter="vision">Vision</button>
@@ -195,6 +197,14 @@
     </div>
 
     <div class="picker-list" id="model-list" role="listbox" aria-label="Models"></div>
+
+    <form class="manual-model" id="manual-model-form" hidden>
+      <label class="manual-model-field">
+        <span class="field-label">Use a model ID directly</span>
+        <input id="manual-model" type="text" maxlength="200" placeholder="e.g. llama3.1:8b" autocomplete="off" spellcheck="false">
+      </label>
+      <button class="btn" type="submit">Use model</button>
+    </form>
 
     <footer class="picker-foot">
       <span class="muted" id="model-count"></span>
@@ -404,6 +414,7 @@
       <nav class="settings-nav" role="tablist" aria-label="Settings sections">
         <button class="settings-tab active" type="button" role="tab" data-settings-tab="chat" aria-selected="true">Chat</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="persona" aria-selected="false">Persona</button>
+        <button class="settings-tab" type="button" role="tab" data-settings-tab="backends" aria-selected="false">Backends</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="providers" aria-selected="false">Providers</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="appearance" aria-selected="false">Appearance</button>
       </nav>
@@ -469,10 +480,18 @@
           </section>
         </section>
 
+        <section class="settings-panel" data-settings-panel="backends" role="tabpanel" hidden>
+          <section class="field">
+            <h3 class="settings-section-title">Local backends</h3>
+            <span class="field-help">Clachan can talk to an OpenAI-compatible server on your LAN. Local backends are text-only: server tools, provider routing, reasoning effort, and image or PDF attachments stay OpenRouter-only. Each profile keeps its own addresses and keys.</span>
+          </section>
+          <div class="backend-settings" id="backend-settings"></div>
+        </section>
+
         <section class="settings-panel" data-settings-panel="providers" role="tabpanel" hidden>
           <label class="field">
-            <span class="field-label">Ignored providers</span>
-            <span class="field-help">Use OpenRouter provider slugs, not the display names on the privacy page. For example, “Sail Research” is <code>sail-research</code>. Slugs also appear as endpoint tags in Provider routing. Separate multiple values with commas; Clachan hides matching endpoints and asks OpenRouter to skip them.</span>
+            <span class="field-label">Ignored providers (OpenRouter)</span>
+            <span class="field-help">Use OpenRouter provider slugs, not the display names on the privacy page. For example, “Sail Research” is <code>sail-research</code>. Slugs also appear as endpoint tags in Provider routing. Separate multiple values with commas; Clachan hides matching endpoints and asks OpenRouter to skip them. This does not affect local backends.</span>
             <input id="ignored-providers" type="text" maxlength="2000" placeholder="e.g. open-inference, sail-research, deepinfra/turbo" autocomplete="off" spellcheck="false">
           </label>
         </section>

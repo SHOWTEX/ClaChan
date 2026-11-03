@@ -234,21 +234,38 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	if providerID == "" {
 		providerID = providerOpenRouter
 	}
-	provider, ok := s.providers[providerID]
-	if !ok {
+	provider, err := s.providerFor(r.Context(), profile.ID, providerID)
+	switch {
+	case errors.Is(err, ErrUnknownProvider):
 		writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+		return
+	case errors.Is(err, ErrBackendNotConfigured):
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"That backend is not configured for this profile.", 0)
+		return
+	case err != nil:
+		s.log.Error("resolve backend", "err", err, "provider", providerID)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
 		return
 	}
 
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = s.cfg.DefaultModel
-	}
-	if model == "" {
-		model = provider.DefaultModel
+		if provider.Local {
+			model = provider.DefaultModel
+		} else {
+			model = s.cfg.DefaultModel
+			if model == "" {
+				model = provider.DefaultModel
+			}
+		}
 	}
 	if len(model) > 200 {
 		writeError(w, http.StatusBadRequest, "bad_request", "That model name is too long.", 0)
+		return
+	}
+	if model != "" && provider.Local && !validLocalModelID(model) {
+		writeError(w, http.StatusBadRequest, "bad_request", "That model ID is invalid.", 0)
 		return
 	}
 
@@ -288,6 +305,11 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	maxToolCalls := defaultToolCalls
 	if req.MaxToolCalls != nil {
 		maxToolCalls = *req.MaxToolCalls
+	}
+	// Local backends have no server tools; 0 means "not applicable" rather than
+	// an out-of-range tool cap.
+	if maxToolCalls == 0 && provider.Local {
+		maxToolCalls = defaultToolCalls
 	}
 	if maxToolCalls < 1 || maxToolCalls > maxToolCallsLimit {
 		writeError(w, http.StatusBadRequest, "bad_request", "Tool calls must be between 1 and 30.", 0)
@@ -356,21 +378,38 @@ func (s *Server) handleImportConversation(w http.ResponseWriter, r *http.Request
 	if providerID == "" {
 		providerID = providerOpenRouter
 	}
-	provider, ok := s.providers[providerID]
-	if !ok {
+	provider, err := s.providerFor(r.Context(), profile.ID, providerID)
+	switch {
+	case errors.Is(err, ErrUnknownProvider):
 		writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+		return
+	case errors.Is(err, ErrBackendNotConfigured):
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"That backend is not configured for this profile.", 0)
+		return
+	case err != nil:
+		s.log.Error("resolve backend", "err", err, "provider", providerID)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
 		return
 	}
 
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = s.cfg.DefaultModel
-	}
-	if model == "" {
-		model = provider.DefaultModel
+		if provider.Local {
+			model = provider.DefaultModel
+		} else {
+			model = s.cfg.DefaultModel
+			if model == "" {
+				model = provider.DefaultModel
+			}
+		}
 	}
 	if len(model) > 200 {
 		writeError(w, http.StatusBadRequest, "bad_request", "That model name is too long.", 0)
+		return
+	}
+	if model != "" && provider.Local && !validLocalModelID(model) {
+		writeError(w, http.StatusBadRequest, "bad_request", "That model ID is invalid.", 0)
 		return
 	}
 
@@ -558,8 +597,20 @@ func (s *Server) handleUpdateConversation(w http.ResponseWriter, r *http.Request
 	}
 	if req.Provider != nil {
 		id := strings.TrimSpace(*req.Provider)
-		if _, ok := s.providers[id]; !ok {
-			writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+		if id == "" {
+			id = providerOpenRouter
+		}
+		if _, err := s.providerFor(r.Context(), profile.ID, id); err != nil {
+			switch {
+			case errors.Is(err, ErrUnknownProvider):
+				writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+			case errors.Is(err, ErrBackendNotConfigured):
+				writeError(w, http.StatusBadRequest, "bad_request",
+					"That backend is not configured for this profile.", 0)
+			default:
+				s.log.Error("resolve backend", "err", err, "provider", id)
+				writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
+			}
 			return
 		}
 		req.Provider = &id
@@ -568,6 +619,26 @@ func (s *Server) handleUpdateConversation(w http.ResponseWriter, r *http.Request
 		model := strings.TrimSpace(*req.Model)
 		if len(model) > 200 {
 			writeError(w, http.StatusBadRequest, "bad_request", "That model name is too long.", 0)
+			return
+		}
+		providerID := ""
+		if req.Provider != nil {
+			providerID = *req.Provider
+		} else {
+			stored, err := s.store.conversationProvider(r.Context(), profile.ID, r.PathValue("id"))
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "Conversation not found.", 0)
+				return
+			}
+			if err != nil {
+				s.log.Error("load conversation provider", "err", err)
+				writeError(w, http.StatusInternalServerError, "storage", "Could not load the conversation.", 0)
+				return
+			}
+			providerID = stored
+		}
+		if model != "" && providerID != providerOpenRouter && !validLocalModelID(model) {
+			writeError(w, http.StatusBadRequest, "bad_request", "That model ID is invalid.", 0)
 			return
 		}
 		req.Model = &model

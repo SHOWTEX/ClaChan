@@ -1,15 +1,16 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.0.6-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.0.7-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
 ![Direct dependencies: 2](https://img.shields.io/badge/dependencies-2-brightgreen)
 
 A small, self-hosted AI chat for your LAN. One static Go binary, SQLite for
-history, a vanilla JavaScript interface, and OpenRouter behind the server.
-Profiles let your chats and settings follow you between devices. It is designed
-to run comfortably on a 1 GB Raspberry Pi 3B+.
+history, a vanilla JavaScript interface, and OpenRouter or a local
+OpenAI-compatible server behind it. Profiles let your chats and settings follow
+you between devices. It is designed to run comfortably on a 1 GB Raspberry Pi
+3B+.
 
 ## Install
 
@@ -73,8 +74,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.0.6` (Linux) or
-`-Release v1.0.6` (Windows).
+To pin a version, download the installer and pass `--release v1.0.7` (Linux) or
+`-Release v1.0.7` (Windows).
 
 ## Uninstall
 
@@ -103,6 +104,9 @@ Uninstall keeps each platform's configuration and database by default. Add
 
 - Streaming chat with OpenRouter (SSE, flushed per frame, so tokens appear as
   they arrive)
+- Optional local backends: KoboldCpp, Ollama, LM Studio, llama.cpp, or any
+  OpenAI-compatible server on your LAN, configured per profile and proxied
+  through the server so the browser never needs CORS access to them
 - Profiles with passwords: chats, prompts, and settings are isolated per profile
   and available on any device signed into it
 - Conversation history in SQLite, scoped to the profile
@@ -123,7 +127,8 @@ Uninstall keeps each platform's configuration and database by default. Add
   menu fed by the model catalogue (`supported_efforts` / `default_effort`)
 - Image, PDF, and text attachments: images are downscaled in the browser before
   upload, text/code files are sent as text parts, and all attachments are stored
-  in SQLite so messages replay after a reload
+  in SQLite so messages replay after a reload. Local backends accept text files
+  only and flatten them into the message body.
 - Named themes: Dark, Light, Midnight, Midnight purple, Forest, Sepia; applied
   instantly from Settings
 - Markdown rendering with file cards: inferred filename, language, size, raw-text
@@ -145,15 +150,16 @@ your server — no email, no cloud account.
 ```mermaid
 flowchart LR
   browser["Browser\nvanilla JS + SSE"] -->|"HTTP"| server["Go server\nnet/http"]
-  server --> db[("SQLite\nprofiles, chats, prompts")]
+  server --> db[("SQLite\nprofiles, chats, prompts, backends")]
   server -->|"Responses API"| openrouter["OpenRouter"]
+  server -->|"Chat Completions API"| local["KoboldCpp / Ollama /\nLM Studio / llama.cpp"]
   server --> embedded["Embedded static files"]
 ```
 
-The browser never talks to OpenRouter and never sees the API key. The server
-rebuilds conversation history from SQLite for every request, streams upstream
-events to the browser, and writes the completed assistant message back to the
-database.
+The browser never talks to OpenRouter or a local backend, and never sees an API
+key. The server rebuilds conversation history from SQLite for every request,
+streams upstream events to the browser, and writes the completed assistant
+message back to the database.
 
 ## Requirements
 
@@ -171,7 +177,8 @@ database.
 
 **Account**
 
-- An [OpenRouter](https://openrouter.ai) API key
+- An [OpenRouter](https://openrouter.ai) API key, or at least one local
+  OpenAI-compatible backend on the LAN
 
 ## Build
 
@@ -186,7 +193,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.0.6" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.0.7" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -195,7 +202,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.6" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.0.7" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -261,7 +268,7 @@ purge.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | *(empty)* | Required. Server-side only; never sent to the browser. |
+| `OPENROUTER_API_KEY` | *(empty)* | Server-side only; never sent to the browser. Required for OpenRouter chats. |
 | `CLACHAN_ADDR` | `:7654` | Listen address. Use `:7654` for LAN access. |
 | `CLACHAN_DB` | `./data/clachan.db` | SQLite file. Its parent directory is created if missing. |
 | `DEFAULT_MODEL` | `deepseek/deepseek-v4.1-flash-1017` | Model for new conversations. |
@@ -273,8 +280,9 @@ purge.
 `OPENROUTER_REFERER` defaults to the project repository, so OpenRouter
 attribution identifies Clachan. Forks should override it with their own URL.
 
-The server starts without a key and serves the UI, but chat requests are
-rejected with a clear message until `OPENROUTER_API_KEY` is set.
+The server starts without a key and serves the UI. OpenRouter chats are rejected
+with a clear message until `OPENROUTER_API_KEY` is set; a configured local
+backend works without it.
 
 ## Manual deployment
 
@@ -363,8 +371,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.0.6 -m "v1.0.6"
-git push origin v1.0.6
+git tag -a v1.0.7 -m "v1.0.7"
+git push origin v1.0.7
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
@@ -388,7 +396,7 @@ Session required:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/chat` | Stream a reply as SSE. Body: `conversationId`, `content`, optional `attachments` (image/PDF/text parts), `toolsEnabled`, `maxToolCalls`, `reasoningEffort`, `timezone`, `provider`, `model`, `action` (`regenerate`, `edit`), `messageId`. Events include `meta`, `delta`, `reasoning`, `step`, `citation`, `done`, and `error`. |
+| `POST` | `/api/chat` | Stream a reply as SSE. Body: `conversationId`, `content`, optional `attachments` (image/PDF/text parts), `toolsEnabled`, `maxToolCalls`, `reasoningEffort`, `timezone`, `provider`, `model`, `action` (`regenerate`, `edit`), `messageId`. `provider` is `openrouter` or a local backend ID. Events include `meta`, `delta`, `reasoning`, `step`, `citation`, `done`, and `error`. |
 | `GET` | `/api/conversations` | List conversations with a preview and the saved reasoning effort. |
 | `POST` | `/api/conversations` | Create a conversation, including initial `toolsEnabled`, `maxToolCalls`, and `reasoningEffort`. |
 | `POST` | `/api/conversations/import` | Import a JSON conversation export into the signed-in profile. |
@@ -401,9 +409,13 @@ Session required:
 | `PATCH` | `/api/prompts/{id}` | Update a prompt's title, body, or system-preset flag. |
 | `DELETE` | `/api/prompts/{id}` | Delete a prompt. |
 | `GET` | `/api/models` | Cached authenticated catalogue with pricing and capability metadata. |
+| `GET` | `/api/backends` | Backend list for this profile: OpenRouter status plus each local backend's saved address, model, and whether a key is stored. |
+| `PUT` | `/api/backends/{id}` | Save a local backend (`baseUrl`, optional `label`, `model`, `apiKey`, `clearKey`). Keys are stored server-side and never returned. |
+| `DELETE` | `/api/backends/{id}` | Forget a local backend for this profile. |
+| `GET` | `/api/backends/{id}/models` | Proxy the backend's `/v1/models` list. The browser never contacts the LAN server directly. |
 | `GET` | `/api/model-endpoints?model=author/slug` | Cached provider endpoints with p50 latency/throughput, uptime, quantization, and native tools. |
 | `POST` | `/api/auth/password` | Change your password (requires the current one). |
-| `PATCH` | `/api/profile` | Change profile settings: default model, assistant name, default system prompt, your name/context, and ignored provider slugs. |
+| `PATCH` | `/api/profile` | Change profile settings: default model and provider, assistant name, default system prompt, your name/context, and ignored provider slugs. |
 | `GET` | `/api/profiles` | Owner only. List profiles. |
 | `POST` | `/api/profiles` | Owner only. Create a profile. |
 
@@ -447,6 +459,17 @@ must send a request body and read the stream with `fetch`.
   entered once per profile.
 - **Default model is per profile.** Set it in Settings; it applies to new chats
   and syncs across devices. Existing conversations keep their own model.
+- **Local backends are per profile and text-only.** Settings → Backends stores an
+  address, optional API key, and default model for KoboldCpp, Ollama, LM Studio,
+  llama.cpp, or a custom OpenAI-compatible server. Clachan normalises the address
+  to a `/v1` base, proxies `/v1/models` for the picker, and sends chat through
+  `/v1/chat/completions`. The browser never contacts the LAN server, so no CORS
+  setup is needed. Local chats do not send server tools, provider routing, or
+  reasoning effort, and image/PDF attachments are rejected; text and code files
+  are inlined into the message. The model picker has one tab per configured
+  backend, and each provider remembers its own last model in browser storage.
+  Keys are stored in SQLite and never returned to the browser; the API exposes
+  only `hasKey`.
 - **Tools are per conversation.** The message-bar toggle controls
   `openrouter:web_search` and `openrouter:web_fetch`; the last state is remembered
   for new chats. The max-call field (1–30) sets OpenRouter's top-level
@@ -569,7 +592,12 @@ network, or put TLS in front of it.
 
 - API keys stay on the server. The browser only ever talks to Clachan.
 - All profiles share the server's OpenRouter key and credits; there are no
-  per-profile keys.
+  per-profile OpenRouter keys. Local backend keys are per profile, stored in
+  SQLite, and never returned to the browser.
+- Local backend addresses are user-supplied. Clachan only accepts `http`/`https`
+  URLs without embedded credentials, query strings, or fragments. The server
+  makes the request, so a profile can point Clachan at any host the server can
+  reach; only give accounts to people you trust.
 - The app ships a strict CSP; there is no inline script or style.
 - Model output is parsed into DOM nodes with `textContent`; raw HTML from the
   model is never injected. Links are limited to `http`/`https`.
@@ -582,6 +610,8 @@ network, or put TLS in front of it.
 main.go         server wiring, graceful shutdown, embedded static files
 config.go       environment and minimal .env loader
 provider.go     OpenRouter client, shared HTTP client, model and endpoint caches
+backends.go     local backend specs, per-profile config, URL/model validation, model proxy
+localchat.go    OpenAI chat-completions client and OpenResponses stream adapter
 responses.go    Responses event parsing, reasoning, tool steps, citations
 store.go        SQLite schema, migrations, profile-scoped queries
 auth.go         passwords, sessions, login/profile handlers, middleware

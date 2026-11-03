@@ -413,11 +413,12 @@ func TestProfilesAndSessions(t *testing.T) {
 		t.Fatalf("missing profile = %v", err)
 	}
 
-	if err := s.updateProfileDefaultModel(ctx, second.ID, "test/model"); err != nil {
+	if err := s.updateProfileDefaultModel(ctx, second.ID, providerOpenRouter, "test/model"); err != nil {
 		t.Fatalf("updateProfileDefaultModel: %v", err)
 	}
 	withDefault, err := s.profileByID(ctx, second.ID)
-	if err != nil || withDefault.DefaultModel != "test/model" {
+	if err != nil || withDefault.DefaultModel != "test/model" ||
+		withDefault.DefaultProvider != providerOpenRouter {
 		t.Fatalf("default model = %+v, %v", withDefault, err)
 	}
 

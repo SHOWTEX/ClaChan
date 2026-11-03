@@ -194,6 +194,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	// the public list; the signed-in `current` profile still carries them.
 	for i := range profiles {
 		profiles[i].DefaultModel = ""
+		profiles[i].DefaultProvider = ""
 		profiles[i].IgnoredProviders = ""
 		profiles[i].PersonaName = ""
 		profiles[i].PersonaPrompt = ""
@@ -410,6 +411,7 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		DefaultModel     *string `json:"defaultModel"`
+		DefaultProvider  *string `json:"defaultProvider"`
 		IgnoredProviders *string `json:"ignoredProviders"`
 		PersonaName      *string `json:"personaName"`
 		PersonaPrompt    *string `json:"personaPrompt"`
@@ -420,20 +422,55 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
 		return
 	}
-	if req.DefaultModel == nil && req.IgnoredProviders == nil &&
+	if req.DefaultModel == nil && req.DefaultProvider == nil && req.IgnoredProviders == nil &&
 		req.PersonaName == nil && req.PersonaPrompt == nil &&
 		req.UserName == nil && req.UserPersona == nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "No profile settings to update.", 0)
 		return
 	}
 
-	if req.DefaultModel != nil {
-		model := strings.TrimSpace(*req.DefaultModel)
-		if model != "" && !validModelID(model) {
-			writeError(w, http.StatusBadRequest, "bad_request", "That model ID is invalid.", 0)
+	if req.DefaultModel != nil || req.DefaultProvider != nil {
+		providerID := strings.TrimSpace(profile.DefaultProvider)
+		if providerID == "" {
+			providerID = providerOpenRouter
+		}
+		if req.DefaultProvider != nil {
+			providerID = strings.TrimSpace(*req.DefaultProvider)
+			if providerID == "" {
+				providerID = providerOpenRouter
+			}
+		}
+		if _, err := s.providerFor(r.Context(), profile.ID, providerID); err != nil {
+			switch {
+			case errors.Is(err, ErrUnknownProvider):
+				writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+			case errors.Is(err, ErrBackendNotConfigured):
+				writeError(w, http.StatusBadRequest, "bad_request",
+					"That backend is not configured for this profile.", 0)
+			default:
+				s.log.Error("resolve default backend", "err", err)
+				writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
+			}
 			return
 		}
-		if err := s.store.updateProfileDefaultModel(r.Context(), profile.ID, model); err != nil {
+
+		model := strings.TrimSpace(profile.DefaultModel)
+		if req.DefaultModel != nil {
+			model = strings.TrimSpace(*req.DefaultModel)
+		} else if req.DefaultProvider != nil && providerID != profile.DefaultProvider {
+			model = ""
+		}
+		if model != "" {
+			valid := validModelID(model)
+			if providerID != providerOpenRouter {
+				valid = validLocalModelID(model)
+			}
+			if !valid {
+				writeError(w, http.StatusBadRequest, "bad_request", "That model ID is invalid.", 0)
+				return
+			}
+		}
+		if err := s.store.updateProfileDefaultModel(r.Context(), profile.ID, providerID, model); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not_found", "Profile not found.", 0)
 				return

@@ -17,7 +17,10 @@
     conversations: [],
     current: null,
     providers: [],
+    backends: [],
     provider: "openrouter",
+    pickerProvider: "openrouter",
+    localModels: {},
     model: "",
     providerSort: "",
     providerOnly: "",
@@ -75,9 +78,13 @@
     routingTriggerLabel: document.getElementById("routing-trigger-label"),
     modelDialog: document.getElementById("model-dialog"),
     modelDialogSub: document.getElementById("model-dialog-sub"),
+    backendTabs: document.getElementById("backend-tabs"),
     modelSearch: document.getElementById("model-search"),
+    modelToolbar: document.getElementById("model-toolbar"),
     modelFilters: document.getElementById("model-filters"),
     modelSort: document.getElementById("model-sort"),
+    manualModelForm: document.getElementById("manual-model-form"),
+    manualModel: document.getElementById("manual-model"),
     modelListEl: document.getElementById("model-list"),
     modelCount: document.getElementById("model-count"),
     modelRoutingButton: document.getElementById("model-routing-button"),
@@ -97,9 +104,12 @@
     messages: document.getElementById("messages"),
     composer: document.getElementById("composer"),
     input: document.getElementById("input"),
+    composerToolbar: document.getElementById("composer-toolbar"),
+    composerHint: document.getElementById("composer-hint"),
     toolsToggle: document.getElementById("tools-toggle"),
     toolsToggleLabel: document.getElementById("tools-toggle-label"),
     toolCap: document.getElementById("tool-cap"),
+    toolCapField: document.getElementById("tool-cap-field"),
     reasoningMenu: document.getElementById("reasoning-menu"),
     reasoningTrigger: document.getElementById("reasoning-trigger"),
     reasoningTriggerLabel: document.getElementById("reasoning-trigger-label"),
@@ -123,6 +133,7 @@
     userName: document.getElementById("user-name"),
     userPersona: document.getElementById("user-persona"),
     ignoredProviders: document.getElementById("ignored-providers"),
+    backendSettings: document.getElementById("backend-settings"),
     theme: document.getElementById("theme"),
     saveSettings: document.getElementById("save-settings"),
     settingsNote: document.getElementById("settings-note"),
@@ -405,8 +416,11 @@
     state.pinned = true;
     state.conversations = [];
     state.current = null;
-    state.provider = "openrouter";
-    state.model = pref(pkey(PREFS.model)) || "";
+    state.backends = [];
+    state.localModels = {};
+    state.provider = (state.profile && state.profile.defaultProvider) || "openrouter";
+    state.pickerProvider = state.provider;
+    state.model = "";
     state.providerSort = "";
     state.providerOnly = "";
     state.allowFallbacks = true;
@@ -424,7 +438,14 @@
     renderMessages({ stick: true });
     renderToolBar();
 
-    await Promise.all([loadModels(), loadConversations(true), loadHealth()]);
+    await Promise.all([loadModels(), loadBackends(), loadConversations(true), loadHealth()]);
+
+    applyInitialProvider();
+    updateModelTrigger();
+    updateRoutingTrigger();
+    updateNotice();
+    updateHeading();
+    renderToolBar();
 
     const lastID = pref(pkey(PREFS.lastConversation));
     const target = state.conversations.find((c) => c.id === lastID) || state.conversations[0];
@@ -432,6 +453,13 @@
       await selectConversation(target.id, true);
     } else {
       newChat({ focus: false });
+    }
+
+    if (isLocalProvider(state.provider)) {
+      ensureLocalModels(state.provider).then(() => {
+        updateModelTrigger();
+        updateNotice();
+      });
     }
 
     if (window.matchMedia("(pointer: fine)").matches) dom.input.focus();
@@ -455,7 +483,10 @@
     state.conversations = [];
     state.current = null;
     state.providers = [];
+    state.backends = [];
+    state.localModels = {};
     state.provider = "openrouter";
+    state.pickerProvider = "openrouter";
     state.model = "";
     state.providerReady = false;
     state.pinned = true;
@@ -770,36 +801,177 @@
       state.providers = [];
       if (err.status !== 401) toast("Could not load models: " + err.message);
     }
-
-    const provider = providerInfo() || state.providers[0] || null;
-    if (provider) {
-      state.provider = provider.id;
-      if (!state.model && provider.defaultModel) state.model = provider.defaultModel;
-      if (!state.model && provider.models && provider.models.length) {
-        state.model = provider.models[0].id;
-      }
-    }
-
-    updateModelTrigger();
-    updateRoutingTrigger();
-    updateNotice();
-    updateHeading();
   }
 
-  function providerInfo() {
-    return state.providers.find((p) => p.id === state.provider) || null;
+  async function loadBackends() {
+    try {
+      const data = await api("/api/backends");
+      state.backends = Array.isArray(data.backends) ? data.backends : [];
+    } catch (err) {
+      state.backends = [];
+      if (err.status !== 401) toast("Could not load backends: " + err.message);
+    }
+  }
+
+  function isLocalProvider(id) {
+    // Only OpenRouter is a cloud provider. Any other ID is a local backend,
+    // even if the profile has since removed its configuration.
+    return Boolean(id) && id !== "openrouter";
+  }
+
+  function backendInfo(id) {
+    return state.backends.find((backend) => backend.id === id) || null;
+  }
+
+  function openRouterProvider() {
+    return state.providers.find((provider) => provider.id === "openrouter") || state.providers[0] || null;
+  }
+
+  function modelsFor(providerID) {
+    if (!providerID || providerID === "openrouter") {
+      const provider = openRouterProvider();
+      return (provider && provider.models) || [];
+    }
+    const entry = state.localModels[providerID];
+    return (entry && entry.models) || [];
+  }
+
+  function providerInfo(id = state.provider) {
+    const providerID = id || "openrouter";
+    if (providerID === "openrouter") return openRouterProvider();
+    const backend = backendInfo(providerID);
+    if (!backend || !backend.local) return null;
+    return {
+      id: providerID,
+      label: backend.label || providerID,
+      local: true,
+      enabled: Boolean(backend.configured),
+      error: "",
+      defaultModel: backend.model || "",
+      models: modelsFor(providerID),
+    };
+  }
+
+  function normalizeLocalModel(model) {
+    const id = String(model && model.id ? model.id : "").trim();
+    if (!id) return null;
+    return {
+      id,
+      name: String((model && model.name) || id),
+      created: Number(model && model.created) || 0,
+      supportsVision: Boolean(model && model.supportsVision),
+      supportsFiles: Boolean(model && model.supportsFiles),
+      supportsTools: Boolean(model && model.supportsTools),
+      supportsReasoning: Boolean(model && model.supportsReasoning),
+    };
+  }
+
+  async function ensureLocalModels(providerID, force = false) {
+    if (!isLocalProvider(providerID)) return null;
+    let entry = state.localModels[providerID];
+    if (!entry) {
+      entry = { models: [], loading: false, error: "", loaded: false };
+      state.localModels[providerID] = entry;
+    }
+    if (entry.loading) return entry;
+    if (entry.loaded && !force) return entry;
+
+    entry.loading = true;
+    entry.error = "";
+    try {
+      const data = await api("/api/backends/" + encodeURIComponent(providerID) + "/models");
+      entry.models = (Array.isArray(data.models) ? data.models : [])
+        .map(normalizeLocalModel)
+        .filter(Boolean);
+      entry.loaded = true;
+    } catch (err) {
+      entry.models = [];
+      entry.error = err.message || "Could not load models.";
+      entry.loaded = false;
+    } finally {
+      entry.loading = false;
+    }
+    return entry;
+  }
+
+  function availableBackendTabs() {
+    const tabs = [];
+    const openrouter = openRouterProvider();
+    if (openrouter && openrouter.enabled) {
+      tabs.push({ id: "openrouter", label: openrouter.label || "OpenRouter", local: false });
+    }
+    for (const backend of state.backends) {
+      if (backend.local && backend.configured) {
+        tabs.push({ id: backend.id, label: backend.label || backend.id, local: true });
+      }
+    }
+    return tabs;
+  }
+
+  function firstUsableProvider() {
+    const order = ["openrouter", ...state.backends.filter((backend) => backend.local).map((backend) => backend.id)];
+    for (const id of order) {
+      const info = providerInfo(id);
+      if (info && info.enabled) return id;
+    }
+    return "openrouter";
+  }
+
+  function modelPrefKey(providerID) {
+    return pkey(PREFS.model + "." + (providerID || "openrouter"));
+  }
+
+  function preferredModel(providerID) {
+    const stored = pref(modelPrefKey(providerID));
+    if (stored) return stored;
+    if (providerID === "openrouter") {
+      const legacy = pref(pkey(PREFS.model));
+      if (legacy) return legacy;
+    }
+    const info = providerInfo(providerID);
+    return (info && info.defaultModel) || "";
+  }
+
+  function rememberModel(providerID, modelID) {
+    const id = providerID || "openrouter";
+    setPref(modelPrefKey(id), modelID || "");
+    if (id === "openrouter") setPref(pkey(PREFS.model), modelID || "");
+  }
+
+  function fallbackModel(providerID) {
+    const info = providerInfo(providerID);
+    if (!info) return "";
+    if (info.defaultModel) return info.defaultModel;
+    const models = modelsFor(providerID);
+    return models.length ? models[0].id : "";
+  }
+
+  function applyInitialProvider() {
+    const info = providerInfo(state.provider);
+    if (!info || !info.enabled) state.provider = firstUsableProvider();
+    state.pickerProvider = state.provider;
+    state.model = preferredModel(state.provider) || fallbackModel(state.provider);
   }
 
   function updateNotice() {
     const provider = providerInfo();
+    const local = isLocalProvider(state.provider);
     state.providerReady = Boolean(provider && provider.enabled);
 
     let message = "";
     if (!provider) {
-      message = "No provider is configured on the server.";
+      message = local
+        ? "This chat's backend is no longer configured. Choose a model to switch backends."
+        : "No provider is configured on the server.";
     } else if (!provider.enabled) {
-      message = (provider.error || "OpenRouter is not configured on the server.") +
-        " Add OPENROUTER_API_KEY to .env and restart Clachan.";
+      message = local
+        ? provider.label + " is not configured for this profile. Add its address in Settings → Backends."
+        : (provider.error || "OpenRouter is not configured on the server.") +
+          " Add OPENROUTER_API_KEY to .env and restart Clachan.";
+    } else if (local) {
+      if (!state.model) {
+        message = provider.label + " has no model selected. Choose one in the model picker.";
+      }
     } else if (!provider.models || provider.models.length === 0) {
       message = "The model list could not be loaded" +
         (provider.error ? " (" + provider.error + ")" : "") +
@@ -808,9 +980,11 @@
 
     dom.notice.hidden = !message;
     dom.notice.textContent = message;
-    dom.send.disabled = state.streaming || !state.providerReady;
-    dom.modelPicker.disabled = !state.providerReady;
-    dom.routingPicker.disabled = !state.providerReady || !state.model;
+    const missingModel = local && !state.model;
+    dom.send.disabled = state.streaming || !state.providerReady || missingModel;
+    dom.modelPicker.disabled = availableBackendTabs().length === 0;
+    dom.routingPicker.hidden = local;
+    dom.routingPicker.disabled = local || !state.providerReady || !state.model;
   }
 
   function assistantName() {
@@ -820,8 +994,11 @@
   function updateHeading() {
     dom.chatTitle.textContent = (state.current && state.current.title) || "New chat";
     const bits = [];
+    const local = isLocalProvider(state.provider);
+    const info = providerInfo();
+    if (local && info) bits.push(info.label);
     if (state.model) bits.push(state.model);
-    const routing = routingLabel();
+    const routing = local ? "" : routingLabel();
     if (routing && routing !== "Balanced") bits.push(routing);
     dom.chatSub.textContent = bits.join(" · ") || "No model selected";
 
@@ -833,8 +1010,7 @@
   }
 
   function selectedModel() {
-    const provider = providerInfo();
-    return ((provider && provider.models) || []).find((model) => model.id === state.model) || null;
+    return modelsFor(state.provider).find((model) => model.id === state.model) || null;
   }
 
   function ignoredProviderSet() {
@@ -860,14 +1036,20 @@
 
   function updateModelTrigger() {
     const model = selectedModel();
+    const local = isLocalProvider(state.provider);
+    const info = providerInfo();
     dom.modelTriggerName.textContent = model ? model.name : (state.model || "Choose a model");
-    dom.modelTriggerMeta.textContent = model
-      ? [formatContext(model.contextLength), formatPricePair(model.promptPricePerM, model.completionPricePerM)]
-          .filter(Boolean)
-          .join(" · ")
-      : "";
+    dom.modelTriggerMeta.textContent = local
+      ? ((info && info.label) || "Local backend") + " · text only"
+      : model
+        ? [formatContext(model.contextLength), formatPricePair(model.promptPricePerM, model.completionPricePerM)]
+            .filter(Boolean)
+            .join(" · ")
+        : "";
     dom.modelTriggerBadges.replaceChildren();
-    if (model) {
+    if (local) {
+      dom.modelTriggerBadges.append(makeTag("Local", "local"));
+    } else if (model) {
       if (model.supportsVision) dom.modelTriggerBadges.append(makeTag("Vision", "vision"));
       if (model.supportsTools) dom.modelTriggerBadges.append(makeTag("Tools", "tools"));
     }
@@ -876,6 +1058,11 @@
   }
 
   function updateRoutingTrigger() {
+    if (isLocalProvider(state.provider)) {
+      dom.routingPicker.hidden = true;
+      return;
+    }
+    dom.routingPicker.hidden = false;
     const label = routingLabel();
     dom.routingTriggerLabel.textContent = label;
     dom.routingPicker.classList.toggle("active", Boolean(state.providerOnly || state.providerSort));
@@ -929,46 +1116,108 @@
     }
   }
 
-  function openModelPicker(target = "conversation") {
-    const provider = providerInfo();
-    if (!provider || !provider.enabled) {
-      toast("OpenRouter is not configured on the server.");
-      return;
+  function renderBackendTabs() {
+    const tabs = availableBackendTabs();
+    dom.backendTabs.replaceChildren();
+    dom.backendTabs.hidden = tabs.length <= 1;
+    for (const tab of tabs) {
+      const active = tab.id === state.pickerProvider;
+      const button = el("button", "backend-tab" + (active ? " active" : ""), tab.label);
+      button.type = "button";
+      button.dataset.backend = tab.id;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.addEventListener("click", () => selectPickerBackend(tab.id));
+      dom.backendTabs.append(button);
     }
-    if (!provider.models || provider.models.length === 0) {
-      toast("The model list is unavailable right now.");
+  }
+
+  function syncPickerChrome() {
+    const local = isLocalProvider(state.pickerProvider);
+    const info = providerInfo(state.pickerProvider);
+    const count = modelsFor(state.pickerProvider).length;
+    const label = info ? info.label : state.pickerProvider;
+    dom.modelDialogSub.textContent = state.modelPickerTarget === "default"
+      ? "Default for new chats · " + label
+      : label + (local ? (count ? " · " + count + " models" : " · local backend") : " · " + count + " models");
+    dom.modelToolbar.hidden = local;
+    dom.manualModelForm.hidden = !local;
+    dom.modelRoutingButton.hidden = local || state.modelPickerTarget === "default";
+    dom.modelSearch.placeholder = local ? "Search local models…" : "Search models, authors, IDs…";
+  }
+
+  function ensurePickerModels() {
+    const providerID = state.pickerProvider;
+    if (!isLocalProvider(providerID)) return;
+    const entry = state.localModels[providerID];
+    if (entry && (entry.loaded || entry.loading)) return;
+    ensureLocalModels(providerID).then(() => {
+      if (state.pickerProvider !== providerID) return;
+      syncPickerChrome();
+      if (dom.modelDialog.open) renderModelList();
+    });
+  }
+
+  function selectPickerBackend(providerID) {
+    if (state.pickerProvider === providerID) return;
+    state.pickerProvider = providerID;
+    dom.modelSearch.value = "";
+    renderBackendTabs();
+    syncPickerChrome();
+    renderModelList();
+    ensurePickerModels();
+    dom.modelSearch.focus();
+  }
+
+  function openModelPicker(target = "conversation") {
+    const tabs = availableBackendTabs();
+    if (!tabs.length) {
+      toast("No provider is configured. Add a local backend in Settings → Backends.");
       return;
     }
 
     state.modelPickerTarget = target === "default" ? "default" : "conversation";
-    dom.modelDialogSub.textContent = state.modelPickerTarget === "default"
-      ? "Default for new chats"
-      : provider.label + " · " + provider.models.length + " models";
-    dom.modelRoutingButton.hidden = state.modelPickerTarget === "default";
+    let preferred = state.provider;
+    if (state.modelPickerTarget === "default" && state.profile && state.profile.defaultProvider) {
+      preferred = state.profile.defaultProvider;
+    }
+    if (!tabs.some((tab) => tab.id === preferred)) {
+      preferred = tabs.some((tab) => tab.id === state.provider) ? state.provider : tabs[0].id;
+    }
+    state.pickerProvider = preferred;
+
     dom.modelSearch.value = "";
+    dom.manualModel.value = "";
     dom.modelSort.value = state.modelSort;
     setActiveFilter();
+    renderBackendTabs();
+    syncPickerChrome();
     renderModelList();
     if (!dom.modelDialog.open) dom.modelDialog.showModal();
+    ensurePickerModels();
     dom.modelSearch.focus();
   }
 
   function pickerModelID() {
     if (state.modelPickerTarget === "default") {
-      return (state.profile && state.profile.defaultModel) || "";
+      const providerID = (state.profile && state.profile.defaultProvider) || "openrouter";
+      return providerID === state.pickerProvider ? (state.profile && state.profile.defaultModel) || "" : "";
     }
-    return state.model;
+    return state.provider === state.pickerProvider ? state.model : "";
   }
 
   function filteredModels() {
-    const provider = providerInfo();
+    const providerID = state.pickerProvider;
+    const local = isLocalProvider(providerID);
     const query = dom.modelSearch.value.trim().toLowerCase();
-    let items = ((provider && provider.models) || []).map((model, index) => ({ model, index }));
+    let items = modelsFor(providerID).map((model, index) => ({ model, index }));
 
     if (query) {
       items = items.filter(({ model }) =>
         (model.name + " " + model.id + " " + (model.canonicalSlug || "")).toLowerCase().includes(query));
     }
+    if (local) return items.map((item) => item.model);
+
     if (state.modelFilter === "vision") items = items.filter(({ model }) => model.supportsVision);
     if (state.modelFilter === "tools") items = items.filter(({ model }) => model.supportsTools);
     if (state.modelFilter === "reasoning") items = items.filter(({ model }) => model.supportsReasoning);
@@ -1012,12 +1261,31 @@
   }
 
   function renderModelList() {
+    const providerID = state.pickerProvider;
+    const local = isLocalProvider(providerID);
+    const entry = state.localModels[providerID];
+
+    if (local && (!entry || (entry.loading && !entry.models.length))) {
+      dom.modelListEl.replaceChildren(el("p", "picker-empty", "Loading models from the backend…"));
+      dom.modelCount.textContent = "Loading…";
+      return;
+    }
+    if (local && entry && entry.error && !entry.models.length) {
+      dom.modelListEl.replaceChildren(
+        el("p", "picker-empty", "Could not list models: " + entry.error),
+        el("p", "picker-empty", "You can still enter a model ID below.")
+      );
+      dom.modelCount.textContent = "No models listed";
+      return;
+    }
+
     const models = filteredModels();
     const selectedID = pickerModelID();
     dom.modelListEl.replaceChildren();
 
     if (!models.length) {
-      dom.modelListEl.append(el("p", "picker-empty", "No models match that search."));
+      dom.modelListEl.append(el("p", "picker-empty",
+        local ? "No models match that search. Use the field below to enter an ID." : "No models match that search."));
       dom.modelCount.textContent = "0 models";
       return;
     }
@@ -1032,15 +1300,21 @@
 
       const main = el("span", "model-main");
       main.append(el("span", "model-name", model.name));
-      main.append(el("span", "model-id", model.id));
+      // Local model IDs are usually the same string as the name; showing both
+      // just repeats the row.
+      if (model.id !== model.name) main.append(el("span", "model-id", model.id));
       const tags = el("span", "model-tags");
       const tagNodes = modelTags(model);
       for (const tag of tagNodes) tags.append(tag);
       if (tagNodes.length) main.append(tags);
 
       const meta = el("span", "model-meta");
-      meta.append(el("span", "model-price", formatPricePair(model.promptPricePerM, model.completionPricePerM)));
-      if (model.contextLength) meta.append(el("span", "model-context", formatContext(model.contextLength)));
+      if (local) {
+        meta.append(el("span", "model-price", "Local"));
+      } else {
+        meta.append(el("span", "model-price", formatPricePair(model.promptPricePerM, model.completionPricePerM)));
+        if (model.contextLength) meta.append(el("span", "model-context", formatContext(model.contextLength)));
+      }
       row.append(main, meta);
 
       if (model.id === selectedID) row.append(el("span", "model-check", "✓"));
@@ -1069,37 +1343,53 @@
   }
 
   async function chooseModel(model) {
+    const modelID = String(model && model.id ? model.id : "").trim();
+    if (!modelID) return;
+    const targetProvider = state.pickerProvider || state.provider;
+
     if (state.modelPickerTarget === "default") {
-      const saved = await setDefaultModel(model.id);
+      const saved = await setDefaultModel(modelID, targetProvider);
       if (saved && dom.modelDialog.open) dom.modelDialog.close();
       return;
     }
 
-    const changed = state.model !== model.id;
-    state.model = model.id;
-    setPref(pkey(PREFS.model), state.model);
+    const providerChanged = state.provider !== targetProvider;
+    const changed = providerChanged || state.model !== modelID;
+    state.provider = targetProvider;
+    state.model = modelID;
+    rememberModel(targetProvider, modelID);
 
-    // A pinned endpoint belongs to one model; keep sorts, drop a stale pin.
-    if (changed && state.providerOnly) {
+    // A pinned endpoint belongs to one OpenRouter model; keep sorts, drop a
+    // stale pin. Local backends have no routing at all.
+    if (changed && (state.providerOnly || providerChanged)) {
       state.providerOnly = "";
       state.providerSort = "";
       state.allowFallbacks = true;
+    }
+    if (isLocalProvider(targetProvider)) {
+      state.reasoningEffort = "";
+      setPref(pkey(PREFS.reasoningEffort), "");
     }
 
     if (dom.modelDialog.open) dom.modelDialog.close();
     updateModelTrigger();
     updateRoutingTrigger();
+    updateNotice();
     updateHeading();
+    renderToolBar();
 
     persistConversationSettings({
+      provider: targetProvider,
       model: state.model,
       providerSort: state.providerSort,
       providerOnly: state.providerOnly,
       allowFallbacks: state.allowFallbacks,
+      reasoningEffort: activeReasoningEffort(),
     });
   }
 
   function openRoutingDialog() {
+    if (isLocalProvider(state.provider)) return;
     if (!state.model) {
       toast("Choose a model first.");
       return;
@@ -1421,6 +1711,7 @@
       };
       state.provider = conversation.provider || state.provider;
       state.model = conversation.model || state.model;
+      rememberModel(state.provider, state.model);
       state.providerSort = conversation.providerSort || "";
       state.providerOnly = conversation.providerOnly || "";
       state.allowFallbacks = conversation.allowFallbacks !== false;
@@ -1442,7 +1733,6 @@
       clearAttachments();
 
       setPref(pkey(PREFS.lastConversation), id);
-      if (conversation.model) setPref(pkey(PREFS.model), conversation.model);
 
       updateModelTrigger();
       updateRoutingTrigger();
@@ -1452,6 +1742,13 @@
       renderMessages({ stick: true });
       renderConversations();
       closeSidebar();
+
+      if (isLocalProvider(state.provider)) {
+        ensureLocalModels(state.provider).then(() => {
+          updateModelTrigger();
+          updateNotice();
+        });
+      }
 
       if (!fromBoot) dom.input.focus();
     } catch (err) {
@@ -1467,14 +1764,37 @@
     clearRetry();
     state.autoRetried = false;
     clearAttachments();
-    let draftModel = state.model;
-    if (state.profile && state.profile.defaultModel) {
-      draftModel = state.profile.defaultModel;
+
+    const profileDefaultProvider = (state.profile && state.profile.defaultProvider) || "openrouter";
+    const profileDefaultModel = (state.profile && state.profile.defaultModel) || "";
+    let draftProvider = state.provider;
+    if (profileDefaultModel) {
+      const info = providerInfo(profileDefaultProvider);
+      if (info && info.enabled) draftProvider = profileDefaultProvider;
     }
-    if (draftModel !== state.model && state.providerOnly) {
+
+    const providerChanged = draftProvider !== state.provider;
+    let draftModel = "";
+    if (profileDefaultModel && draftProvider === profileDefaultProvider) {
+      draftModel = profileDefaultModel;
+    } else if (!providerChanged && state.model) {
+      draftModel = state.model;
+    } else {
+      draftModel = preferredModel(draftProvider) || fallbackModel(draftProvider);
+    }
+
+    if (providerChanged) {
+      state.provider = draftProvider;
+      state.providerOnly = "";
+      state.providerSort = "";
+      state.allowFallbacks = true;
+      state.reasoningEffort = "";
+      setPref(pkey(PREFS.reasoningEffort), "");
+    } else if (draftModel !== state.model && state.providerOnly) {
       state.providerOnly = "";
       state.allowFallbacks = true;
     }
+
     state.model = draftModel;
     state.current = {
       id: null,
@@ -1501,6 +1821,14 @@
     renderMessages({ stick: true });
     renderConversations();
     closeSidebar();
+
+    if (isLocalProvider(state.provider)) {
+      ensureLocalModels(state.provider).then(() => {
+        updateModelTrigger();
+        updateNotice();
+      });
+    }
+
     if (options.focus !== false) dom.input.focus();
   }
 
@@ -1510,13 +1838,14 @@
 
     // Omit an empty system prompt so the server can fall back to the profile
     // persona and DEFAULT_SYSTEM_PROMPT. Sending "" would override both.
+    const local = isLocalProvider(state.provider);
     const request = {
       provider: state.provider,
       model: state.model,
-      providerSort: state.providerSort,
-      providerOnly: state.providerOnly,
+      providerSort: local ? "" : state.providerSort,
+      providerOnly: local ? "" : state.providerOnly,
       allowFallbacks: state.allowFallbacks,
-      toolsEnabled: state.toolsEnabled,
+      toolsEnabled: local ? false : state.toolsEnabled,
       maxToolCalls: state.maxToolCalls,
       reasoningEffort: activeReasoningEffort(),
     };
@@ -1529,6 +1858,10 @@
       ...created,
       messages: (state.current && state.current.messages) || [],
     };
+    if (created.model) {
+      state.model = created.model;
+      rememberModel(state.provider, created.model);
+    }
     setPref(pkey(PREFS.lastConversation), created.id);
     updateHeading();
     await loadConversations(true);
@@ -1999,13 +2332,15 @@
 
   function emptyReplyMessage(reason) {
     const value = String(reason || "").toLowerCase();
+    const info = providerInfo();
+    const label = (info && info.label) || "The provider";
     if (value === "max_output_tokens" || value === "length" || value === "incomplete") {
-      return "OpenRouter returned no answer text: the model hit its output limit.";
+      return label + " returned no answer text: the model hit its output limit.";
     }
     if (value === "content_filter") {
-      return "OpenRouter returned no answer text: the model stopped on a content filter.";
+      return label + " returned no answer text: the model stopped on a content filter.";
     }
-    return "OpenRouter returned an empty reply.";
+    return label + " returned an empty reply.";
   }
 
   function errorNote(message) {
@@ -2122,6 +2457,7 @@
   /* --------------------------------------------------------------- streaming */
 
   function assistantDraft(id) {
+    const local = isLocalProvider(state.provider);
     return {
       id: id || tempId(),
       role: "assistant",
@@ -2130,8 +2466,8 @@
       steps: [],
       citations: [],
       toolRun: {
-        enabled: state.toolsEnabled,
-        maxCalls: state.maxToolCalls,
+        enabled: local ? false : state.toolsEnabled,
+        maxCalls: local ? 0 : state.maxToolCalls,
         calls: 0,
         searches: 0,
         activities: [],
@@ -2151,7 +2487,18 @@
       return;
     }
     if (!state.providerReady) {
-      toast("No OpenRouter API key is configured on the server.");
+      const provider = providerInfo();
+      if (isLocalProvider(state.provider)) {
+        toast((provider ? provider.label : "This chat's backend") +
+          " is not configured. Add it in Settings → Backends.");
+      } else {
+        toast("No OpenRouter API key is configured on the server.");
+      }
+      return;
+    }
+    if (isLocalProvider(state.provider) && !state.model) {
+      toast("Choose a model for this backend first.");
+      openModelPicker("conversation");
       return;
     }
 
@@ -2288,12 +2635,13 @@
     let gotMeta = false;
     let gotDone = false;
 
+    const local = isLocalProvider(state.provider);
     const requestBody = {
       conversationId: state.current.id,
       provider: state.provider,
       model: state.model,
-      toolsEnabled: state.toolsEnabled,
-      maxToolCalls: state.maxToolCalls,
+      toolsEnabled: local ? false : state.toolsEnabled,
+      maxToolCalls: local ? 0 : state.maxToolCalls,
       reasoningEffort: activeReasoningEffort(),
       timezone: localTimezone(),
       ...payload,
@@ -2640,6 +2988,7 @@
   }
 
   function reasoningOptions() {
+    if (isLocalProvider(state.provider)) return [];
     const model = selectedModel();
     if (!model || !model.supportsReasoning) return [];
     const info = model.reasoning;
@@ -2676,13 +3025,14 @@
   function updateReasoningControl() {
     const options = reasoningOptions();
     const model = selectedModel();
+    const local = isLocalProvider(state.provider);
     if (state.reasoningEffort && model && (options.length === 0 || !options.includes(state.reasoningEffort))) {
       state.reasoningEffort = "";
       setPref(pkey(PREFS.reasoningEffort), "");
       if (state.current) state.current.reasoningEffort = "";
     }
 
-    dom.reasoningMenu.hidden = options.length === 0;
+    dom.reasoningMenu.hidden = local || options.length === 0;
     dom.reasoningTriggerLabel.textContent = reasoningTriggerText();
     dom.reasoningTrigger.disabled = state.streaming || options.length === 0;
     if (state.streaming) closeReasoningMenu();
@@ -2690,6 +3040,7 @@
     dom.reasoningTrigger.setAttribute("aria-expanded", open ? "true" : "false");
     if (!options.length && !dom.reasoningDropup.hidden) closeReasoningMenu();
     renderReasoningMenu(options);
+    dom.composerToolbar.hidden = dom.toolsToggle.hidden && dom.toolCapField.hidden && dom.reasoningMenu.hidden;
   }
 
   function renderReasoningMenu(options = reasoningOptions()) {
@@ -2770,13 +3121,32 @@
   }
 
   function renderToolBar() {
+    const local = isLocalProvider(state.provider);
     const on = Boolean(state.toolsEnabled);
+    dom.toolsToggle.hidden = local;
+    dom.toolCapField.hidden = local;
     dom.toolsToggle.setAttribute("aria-pressed", on ? "true" : "false");
     dom.toolsToggleLabel.textContent = on ? "Web on" : "Web off";
     dom.toolCap.value = state.maxToolCalls;
     dom.toolsToggle.disabled = state.streaming;
     dom.toolCap.disabled = state.streaming;
+    dom.composerHint.textContent = local
+      ? "Enter to send · Shift+Enter for a new line · Text files only on local backends"
+      : "Enter to send · Shift+Enter for a new line · Attach images, PDFs, or text files";
+    dom.attachFile.title = local ? "Attach a text file" : "Attach image, PDF, or text file";
+    dom.attachFile.setAttribute("aria-label", dom.attachFile.title);
+    syncAttachmentMode();
+    updateAttachmentControls();
     updateReasoningControl();
+  }
+
+  function syncAttachmentMode() {
+    const local = isLocalProvider(state.provider);
+    if (dom.fileInput.dataset.fullAccept === undefined) {
+      dom.fileInput.dataset.fullAccept = dom.fileInput.getAttribute("accept") || "";
+    }
+    const text = "text/*,application/json,application/xml,.json,.go,.py,.js,.ts,.md,.csv,.yaml,.yml,.xml,.sql,.sh,.toml,.ini,.log,.c,.h,.cpp,.rs,.java,.rb,.php,.lua,.swift,.kt,.r,.cs,.scala,.vue,.svelte,.txt";
+    dom.fileInput.accept = local ? text : dom.fileInput.dataset.fullAccept;
   }
 
   function setToolSettings(enabled, calls, persist = true) {
@@ -3044,6 +3414,9 @@
 
   async function prepareAttachment(file) {
     const mime = attachmentMime(file);
+    if (isLocalProvider(state.provider) && mime && !isTextMime(mime)) {
+      throw new Error("This backend is text-only. Attach a text or code file, or switch to OpenRouter.");
+    }
     if (mime === "application/pdf") {
       if (file.size > 12 * 1024 * 1024) {
         throw new Error("PDFs must be 12 MB or smaller.");
@@ -3065,6 +3438,7 @@
   }
 
   function warnAttachmentCapability(attachment) {
+    if (isLocalProvider(state.provider)) return;
     const model = selectedModel();
     if (!model) return;
     if (attachment.kind === "image" && !model.supportsVision) {
@@ -3609,6 +3983,231 @@
     }
   }
 
+  function backendField(labelText, input) {
+    const field = el("label", "field");
+    field.append(el("span", "field-label", labelText), input);
+    return field;
+  }
+
+  function backendStatus(backendID, text, kind = "") {
+    for (const card of dom.backendSettings.querySelectorAll(".backend-card")) {
+      if (card.dataset.id !== backendID) continue;
+      const status = card.querySelector('[data-role="status"]');
+      if (!status) return;
+      status.textContent = text || "";
+      status.className = "backend-card-status" + (kind ? " " + kind : "");
+      return;
+    }
+  }
+
+  function renderBackendSettings() {
+    if (!dom.backendSettings) return;
+    dom.backendSettings.replaceChildren();
+    const locals = state.backends.filter((backend) => backend.local);
+    if (!locals.length) {
+      dom.backendSettings.append(el("p", "picker-empty", "No local backends are available."));
+      return;
+    }
+    for (const backend of locals) dom.backendSettings.append(backendCard(backend));
+  }
+
+  function backendCard(backend) {
+    const card = el("section", "backend-card");
+    card.dataset.id = backend.id;
+
+    const head = el("div", "backend-card-head");
+    const title = el("div", "backend-card-title");
+    title.append(el("span", "backend-card-name", backend.label || backend.id));
+    if (backend.hint) title.append(el("span", "backend-card-hint", backend.hint));
+    head.append(title);
+    head.append(el("span", "tag " + (backend.configured ? "tag-good" : "tag-warn"),
+      backend.configured ? "Configured" : "Not configured"));
+    card.append(head);
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.maxLength = 64;
+    nameInput.autocomplete = "off";
+    nameInput.spellcheck = false;
+    nameInput.dataset.role = "label";
+    nameInput.value = backend.label || "";
+    nameInput.placeholder = "Display name";
+    card.append(backendField("Name", nameInput));
+
+    const urlInput = document.createElement("input");
+    urlInput.type = "url";
+    urlInput.autocomplete = "off";
+    urlInput.spellcheck = false;
+    urlInput.dataset.role = "url";
+    urlInput.value = backend.baseUrl || backend.defaultUrl || "";
+    urlInput.placeholder = backend.defaultUrl || "http://192.168.1.20:5001/v1";
+    card.append(backendField("Address", urlInput));
+
+    const keyInput = document.createElement("input");
+    keyInput.type = "password";
+    keyInput.autocomplete = "off";
+    keyInput.spellcheck = false;
+    keyInput.dataset.role = "key";
+    keyInput.value = "";
+    keyInput.placeholder = backend.hasKey ? "Saved — leave blank to keep" : "Optional API key";
+    card.append(backendField("API key", keyInput));
+
+    const modelInput = document.createElement("input");
+    modelInput.type = "text";
+    modelInput.maxLength = 200;
+    modelInput.autocomplete = "off";
+    modelInput.spellcheck = false;
+    modelInput.dataset.role = "model";
+    modelInput.value = backend.model || "";
+    modelInput.placeholder = "Default model, e.g. llama3.1:8b";
+    card.append(backendField("Default model", modelInput));
+
+    // The card sits inside the settings form, so Enter would otherwise save the
+    // chat settings. Make it save this backend instead.
+    for (const input of card.querySelectorAll("input[data-role]")) {
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        saveBackend(card, backend);
+      });
+    }
+
+    if (backend.hasKey) {
+      const clearLabel = el("label", "toggle-row backend-clear-key");
+      const clearBox = document.createElement("input");
+      clearBox.type = "checkbox";
+      clearBox.dataset.role = "clear-key";
+      clearLabel.append(clearBox, el("span", null, "Remove the saved API key"));
+      card.append(clearLabel);
+    }
+
+    const actions = el("div", "backend-card-actions");
+    const save = el("button", "btn btn-primary", "Save");
+    save.type = "button";
+    save.addEventListener("click", () => saveBackend(card, backend));
+    const test = el("button", "btn", "Test");
+    test.type = "button";
+    test.title = "Save, then fetch the model list from this backend";
+    test.addEventListener("click", () => testBackend(card, backend));
+    actions.append(save, test);
+    if (backend.configured) {
+      const forget = el("button", "btn btn-quiet", "Forget");
+      forget.type = "button";
+      forget.addEventListener("click", () => forgetBackend(backend));
+      actions.append(forget);
+    }
+    card.append(actions);
+
+    const status = el("span", "backend-card-status");
+    status.dataset.role = "status";
+    card.append(status);
+
+    return card;
+  }
+
+  function backendCardValues(card) {
+    const read = (role) => {
+      const node = card.querySelector('[data-role="' + role + '"]');
+      return node ? String(node.value || "").trim() : "";
+    };
+    const clearNode = card.querySelector('[data-role="clear-key"]');
+    return {
+      label: read("label"),
+      baseUrl: read("url"),
+      apiKey: read("key"),
+      model: read("model"),
+      clearKey: Boolean(clearNode && clearNode.checked),
+    };
+  }
+
+  async function saveBackend(card, backend, quiet = false) {
+    const values = backendCardValues(card);
+    if (!values.baseUrl) {
+      backendStatus(backend.id, "Enter the backend address.", "bad");
+      if (!quiet) toast("Enter the backend address.");
+      return false;
+    }
+
+    const body = {
+      baseUrl: values.baseUrl,
+      label: values.label,
+      model: values.model,
+    };
+    if (values.apiKey) body.apiKey = values.apiKey;
+    if (values.clearKey) body.clearKey = true;
+
+    backendStatus(backend.id, "Saving…");
+    try {
+      await api("/api/backends/" + encodeURIComponent(backend.id), { method: "PUT", body });
+      delete state.localModels[backend.id];
+      await loadBackends();
+      renderBackendSettings();
+      backendStatus(backend.id, "Saved.", "ok");
+      if (!quiet) toast("Backend saved.");
+      updateModelTrigger();
+      updateNotice();
+      updateRoutingTrigger();
+      renderToolBar();
+      return true;
+    } catch (err) {
+      backendStatus(backend.id, err.message, "bad");
+      if (!quiet) toast(err.message);
+      return false;
+    }
+  }
+
+  async function testBackend(card, backend) {
+    const saved = await saveBackend(card, backend, true);
+    if (!saved) return;
+
+    backendStatus(backend.id, "Testing…");
+    const entry = await ensureLocalModels(backend.id, true);
+    if (!entry) {
+      backendStatus(backend.id, "That backend is not available.", "bad");
+      return;
+    }
+    if (entry.error) {
+      backendStatus(backend.id, entry.error, "bad");
+      return;
+    }
+    const count = entry.models.length;
+    backendStatus(backend.id, count
+      ? count + " model" + (count === 1 ? "" : "s") + " found."
+      : "The server returned no models.", count ? "ok" : "bad");
+    if (state.provider === backend.id) {
+      updateModelTrigger();
+      updateNotice();
+    }
+  }
+
+  async function forgetBackend(backend) {
+    if (!window.confirm(`Remove ${backend.label} from this profile?`)) return;
+    try {
+      await api("/api/backends/" + encodeURIComponent(backend.id), { method: "DELETE" });
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
+
+    delete state.localModels[backend.id];
+    await loadBackends();
+    if (state.provider === backend.id) {
+      state.provider = "openrouter";
+      state.model = preferredModel("openrouter") || fallbackModel("openrouter");
+      state.providerOnly = "";
+      state.providerSort = "";
+      state.allowFallbacks = true;
+      state.reasoningEffort = "";
+    }
+    renderBackendSettings();
+    updateModelTrigger();
+    updateRoutingTrigger();
+    updateNotice();
+    updateHeading();
+    renderToolBar();
+    toast("Backend removed.");
+  }
+
   function customSystemPresets() {
     return state.prompts.filter((prompt) => prompt.system);
   }
@@ -3690,8 +4289,13 @@
       ? ""
       : "Saved when you send the first message.";
     updateDefaultModelSetting();
+    renderBackendSettings();
     setSettingsTab("chat");
     populatePresetSelects();
+
+    if (isLocalProvider(state.profile.defaultProvider)) {
+      ensureLocalModels(state.profile.defaultProvider).then(updateDefaultModelSetting);
+    }
 
     if (!dom.settings.open) dom.settings.showModal();
     // Refresh saved presets; the dialog stays responsive while they load.
@@ -3700,7 +4304,8 @@
 
   function updateDefaultModelSetting() {
     const id = (state.profile && state.profile.defaultModel) || "";
-    const provider = providerInfo();
+    const providerID = (state.profile && state.profile.defaultProvider) || "openrouter";
+    const provider = providerInfo(providerID);
     const model = id && provider && provider.models
       ? provider.models.find((candidate) => candidate.id === id)
       : null;
@@ -3708,13 +4313,15 @@
     dom.defaultModelClear.hidden = !id;
   }
 
-  async function setDefaultModel(id) {
+  async function setDefaultModel(id, providerID) {
+    const provider = providerID || state.pickerProvider || state.provider || "openrouter";
     try {
       const updated = await api("/api/profile", {
         method: "PATCH",
-        body: { defaultModel: id },
+        body: { defaultModel: id, defaultProvider: provider },
       });
       state.profile.defaultModel = updated.defaultModel || "";
+      state.profile.defaultProvider = updated.defaultProvider || provider;
       updateDefaultModelSetting();
       toast(id ? "Default model set for new chats." : "Default model cleared.");
       return true;
@@ -3768,6 +4375,7 @@
           ...state.profile,
           ...updated,
           defaultModel: updated.defaultModel || "",
+          defaultProvider: updated.defaultProvider || "",
           ignoredProviders: updated.ignoredProviders || "",
           personaName: updated.personaName || "",
           personaPrompt: updated.personaPrompt || "",
@@ -4318,10 +4926,20 @@
     dom.modelPicker.addEventListener("click", () => openModelPicker("conversation"));
     dom.routingPicker.addEventListener("click", openRoutingDialog);
     dom.defaultModelButton.addEventListener("click", () => openModelPicker("default"));
-    dom.defaultModelClear.addEventListener("click", () => setDefaultModel(""));
+    dom.defaultModelClear.addEventListener("click", () => setDefaultModel("", state.provider));
     dom.modelRoutingButton.addEventListener("click", () => {
       if (dom.modelDialog.open) dom.modelDialog.close();
       openRoutingDialog();
+    });
+
+    dom.manualModelForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const id = dom.manualModel.value.trim();
+      if (!id) {
+        dom.manualModel.focus();
+        return;
+      }
+      chooseModel({ id, name: id });
     });
 
     dom.modelSearch.addEventListener("input", renderModelList);

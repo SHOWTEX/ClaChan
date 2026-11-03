@@ -174,14 +174,26 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if providerID == "" {
 		providerID = providerOpenRouter
 	}
-	provider, ok := s.providers[providerID]
-	if !ok {
+	provider, err := s.providerFor(r.Context(), profile.ID, providerID)
+	switch {
+	case errors.Is(err, ErrUnknownProvider):
 		writeError(w, http.StatusBadRequest, "bad_request", "Unknown provider.", 0)
+		return
+	case errors.Is(err, ErrBackendNotConfigured):
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"That backend is not configured for this profile. Add it in Settings → Backends.", 0)
+		return
+	case err != nil:
+		s.log.Error("resolve backend", "err", err, "provider", providerID)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
 		return
 	}
 	if !provider.enabled() {
-		writeError(w, http.StatusBadGateway, "provider_auth",
-			"No OpenRouter API key is configured on the server.", 0)
+		message := "No OpenRouter API key is configured on the server."
+		if provider.Local {
+			message = provider.Label + " is not configured for this profile."
+		}
+		writeError(w, http.StatusBadGateway, "provider_auth", message, 0)
 		return
 	}
 
@@ -209,7 +221,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if toolCalls == 0 {
 		toolCalls = defaultToolCalls
 	}
-	if req.MaxToolCalls != nil {
+	// Local backends have no server tools, so the browser sends 0 to say "not
+	// applicable". Only validate the range for providers that actually use it.
+	if req.MaxToolCalls != nil && !provider.Local {
 		if *req.MaxToolCalls < 1 || *req.MaxToolCalls > maxToolCallsLimit {
 			writeError(w, http.StatusBadRequest, "bad_request", "Tool calls must be between 1 and 30.", 0)
 			return
@@ -221,21 +235,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if req.ReasoningEffort != nil {
 		reasoningEffort = strings.TrimSpace(*req.ReasoningEffort)
 	}
-	if reasoningEffort != "" && !validReasoningEffort(reasoningEffort) {
-		writeError(w, http.StatusBadRequest, "bad_request", "Unknown reasoning effort.", 0)
-		return
-	}
-	if reasoningEffort != "" {
-		if info := s.models.lookup(provider.ID, model); info != nil {
-			if info.Reasoning == nil || len(info.Reasoning.SupportedEfforts) == 0 {
-				writeError(w, http.StatusBadRequest, "bad_request",
-					"This model does not expose reasoning effort.", 0)
-				return
-			}
-			if !containsString(info.Reasoning.SupportedEfforts, reasoningEffort) {
-				writeError(w, http.StatusBadRequest, "bad_request",
-					"That reasoning effort is not available for this model.", 0)
-				return
+	if provider.Local {
+		// Server tools, provider routing and reasoning effort are OpenRouter
+		// features. A local model would reject the payload fields, so drop them
+		// instead of half-supporting them.
+		toolsEnabled = false
+		toolCalls = 0
+		reasoningEffort = ""
+	} else {
+		if reasoningEffort != "" && !validReasoningEffort(reasoningEffort) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Unknown reasoning effort.", 0)
+			return
+		}
+		if reasoningEffort != "" {
+			if info := s.models.lookup(provider.ID, model); info != nil {
+				if info.Reasoning == nil || len(info.Reasoning.SupportedEfforts) == 0 {
+					writeError(w, http.StatusBadRequest, "bad_request",
+						"This model does not expose reasoning effort.", 0)
+					return
+				}
+				if !containsString(info.Reasoning.SupportedEfforts, reasoningEffort) {
+					writeError(w, http.StatusBadRequest, "bad_request",
+						"That reasoning effort is not available for this model.", 0)
+					return
+				}
 			}
 		}
 	}
@@ -287,34 +310,49 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		history = history[:idx]
 	}
 
+	if provider.Local && req.Action == "" && hasNonTextAttachment(userAttachments) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"This backend is text-only. Remove image or PDF attachments, or switch to OpenRouter.", 0)
+		return
+	}
+
 	systemPrompt := buildSystemPrompt(conv.SystemPrompt, profile.PersonaName, profile.UserName, profile.UserPersona)
-	msgs := make([]responseInputMessage, 0, len(history)+1)
-	for _, m := range history {
-		if m.Role == "user" || m.Role == "assistant" {
+
+	var (
+		msgs        []responseInputMessage
+		localMsgs   []upstreamMessage
+		serverTools []serverTool
+		reasoning   *reasoningRequest
+	)
+	if provider.Local {
+		localMsgs = localChatMessages(systemPrompt, history, userContent, userAttachments, req.Action != "regenerate")
+	} else {
+		msgs = make([]responseInputMessage, 0, len(history)+1)
+		for _, m := range history {
+			if m.Role == "user" || m.Role == "assistant" {
+				msgs = append(msgs, responseInputMessage{
+					Type:    "message",
+					Role:    m.Role,
+					Content: responsesContent(m.Content, m.Attachments),
+				})
+			}
+		}
+		if req.Action != "regenerate" {
 			msgs = append(msgs, responseInputMessage{
 				Type:    "message",
-				Role:    m.Role,
-				Content: responsesContent(m.Content, m.Attachments),
+				Role:    "user",
+				Content: responsesContent(userContent, userAttachments),
 			})
 		}
-	}
-	if req.Action != "regenerate" {
-		msgs = append(msgs, responseInputMessage{
-			Type:    "message",
-			Role:    "user",
-			Content: responsesContent(userContent, userAttachments),
-		})
-	}
 
-	serverTools := buildServerTools(toolsEnabled, timezone)
-
-	var reasoning *reasoningRequest
-	if info := s.models.lookup(provider.ID, model); info != nil && info.SupportsReasoning {
-		reasoning = &reasoningRequest{Summary: "auto"}
-		if reasoningEffort != "" {
-			reasoning.Effort = reasoningEffort
-		} else if info.Reasoning != nil && !info.Reasoning.DefaultEnabled && !info.Reasoning.Mandatory {
-			reasoning = nil
+		serverTools = buildServerTools(toolsEnabled, timezone)
+		if info := s.models.lookup(provider.ID, model); info != nil && info.SupportsReasoning {
+			reasoning = &reasoningRequest{Summary: "auto"}
+			if reasoningEffort != "" {
+				reasoning.Effort = reasoningEffort
+			} else if info.Reasoning != nil && !info.Reasoning.DefaultEnabled && !info.Reasoning.Mandatory {
+				reasoning = nil
+			}
 		}
 	}
 
@@ -329,26 +367,36 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer watchdog.Stop()
 
 	startedAt := time.Now()
-	resp, err := provider.responses(upCtx, s.client, model, msgs, systemPrompt,
-		conversationProviderPrefs(conv, ignoredProviderList(profile.IgnoredProviders)),
-		serverTools, toolCalls, reasoning)
+	var resp *http.Response
+	if provider.Local {
+		resp, err = provider.localResponses(upCtx, s.client, model, localMsgs)
+	} else {
+		resp, err = provider.responses(upCtx, s.client, model, msgs, systemPrompt,
+			conversationProviderPrefs(conv, ignoredProviderList(profile.IgnoredProviders)),
+			serverTools, toolCalls, reasoning)
+	}
 	if err != nil {
 		if r.Context().Err() != nil {
 			return // client hung up before the request was sent
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			s.log.Warn("upstream timeout", "provider", provider.ID)
-			writeError(w, http.StatusGatewayTimeout, "provider_timeout", "OpenRouter did not respond in time.", 0)
+			writeError(w, http.StatusGatewayTimeout, "provider_timeout",
+				provider.Label+" did not respond in time.", 0)
 			return
 		}
 		s.log.Warn("upstream dial failed", "provider", provider.ID, "err", err)
-		writeError(w, http.StatusBadGateway, "provider_unreachable", "Could not reach OpenRouter.", 0)
+		message := "Could not reach " + provider.Label + "."
+		if provider.Local {
+			message = "Could not reach " + provider.Label + " at " + provider.BaseURL + "."
+		}
+		writeError(w, http.StatusBadGateway, "provider_unreachable", message, 0)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		s.handleUpstreamStatus(w, resp)
+		s.handleUpstreamStatus(w, resp, provider)
 		return
 	}
 
@@ -376,7 +424,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "storage", "Could not save the message.", 0)
 		return
 	}
-	if req.ToolsEnabled != nil || req.MaxToolCalls != nil || req.ReasoningEffort != nil {
+	// Local backends ignore these, so do not overwrite the conversation's saved
+	// OpenRouter tool and reasoning settings with the local defaults.
+	if !provider.Local && (req.ToolsEnabled != nil || req.MaxToolCalls != nil || req.ReasoningEffort != nil) {
 		_ = s.store.updateConversation(writeCtx, profile.ID, conv.ID, ConversationUpdate{
 			ToolsEnabled:    &toolsEnabled,
 			MaxToolCalls:    &toolCalls,
@@ -652,7 +702,7 @@ read:
 					}
 				}
 				if streamErr == "" {
-					streamErr = "OpenRouter stopped before the reply was complete."
+					streamErr = provider.Label + " stopped before the reply was complete."
 				}
 
 			case "error":
@@ -660,14 +710,14 @@ read:
 					streamErr = truncate(event.Error.Message, 300)
 				}
 				if streamErr == "" {
-					streamErr = "OpenRouter reported an error mid-stream."
+					streamErr = provider.Label + " reported an error mid-stream."
 				}
 			}
 		}
 
 		if readErr != nil {
 			if readErr != io.EOF && !clientGone && !stalled.Load() && r.Context().Err() == nil && upCtx.Err() == nil {
-				streamErr = "The connection to OpenRouter dropped."
+				streamErr = "The connection to " + provider.Label + " dropped."
 			}
 			break
 		}
@@ -681,7 +731,7 @@ read:
 	// was truncated, not finished. Say so instead of presenting a partial reply
 	// as complete.
 	if !clientGone && !timedOut && !stalled.Load() && !terminalSeen && streamErr == "" {
-		streamErr = "The connection to OpenRouter closed before the reply finished."
+		streamErr = "The connection to " + provider.Label + " closed before the reply finished."
 	}
 
 	indices := make([]int, 0, len(outputByIndex))
@@ -726,6 +776,7 @@ read:
 	elapsed := time.Since(startedAt).Round(time.Millisecond)
 	s.log.Info("chat completed",
 		"conversation", conv.ID,
+		"provider", provider.ID,
 		"model", model,
 		"chars", len(text),
 		"reasoningChars", len(finalReasoning),
@@ -754,7 +805,7 @@ read:
 	if stalled.Load() {
 		_ = sse.event("error", errorEvent{
 			Code:    "upstream_stalled",
-			Message: "OpenRouter stopped sending data. Any partial reply was kept.",
+			Message: provider.Label + " stopped sending data. Any partial reply was kept.",
 		})
 		return
 	}
@@ -830,33 +881,41 @@ func conversationProviderPrefs(conv *Conversation, ignored []string) *providerPr
 	return prefs
 }
 
-func (s *Server) handleUpstreamStatus(w http.ResponseWriter, resp *http.Response) {
+func (s *Server) handleUpstreamStatus(w http.ResponseWriter, resp *http.Response, provider *Provider) {
 	detail := upstreamErrorMessage(resp)
+	label := "OpenRouter"
+	if provider != nil && provider.Label != "" {
+		label = provider.Label
+	}
+	local := provider != nil && provider.Local
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
 		retry := parseRetryAfter(resp.Header.Get("Retry-After"))
-		s.log.Warn("upstream rate limited", "status", resp.StatusCode, "retryAfter", retry)
+		s.log.Warn("upstream rate limited", "provider", label, "status", resp.StatusCode, "retryAfter", retry)
 		writeError(w, http.StatusTooManyRequests, "rate_limited",
-			"OpenRouter is rate limiting requests. Try again shortly.", retry)
+			label+" is rate limiting requests. Try again shortly.", retry)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		s.log.Error("upstream rejected credentials", "status", resp.StatusCode)
-		writeError(w, http.StatusBadGateway, "provider_auth",
-			"OpenRouter rejected the server's API key.", 0)
+		s.log.Error("upstream rejected credentials", "provider", label, "status", resp.StatusCode)
+		message := label + " rejected the server's API key."
+		if local {
+			message = label + " rejected the API key saved for this backend."
+		}
+		writeError(w, http.StatusBadGateway, "provider_auth", message, 0)
 	case http.StatusPaymentRequired:
-		s.log.Warn("upstream payment required", "detail", detail)
+		s.log.Warn("upstream payment required", "provider", label, "detail", detail)
 		writeError(w, http.StatusPaymentRequired, "provider_credits",
-			"OpenRouter reports insufficient credits.", 0)
+			label+" reports insufficient credits.", 0)
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
-		s.log.Warn("upstream rejected request", "status", resp.StatusCode, "detail", detail)
-		message := "OpenRouter rejected the request."
+		s.log.Warn("upstream rejected request", "provider", label, "status", resp.StatusCode, "detail", detail)
+		message := label + " rejected the request."
 		if detail != "" {
-			message = "OpenRouter: " + detail
+			message = label + ": " + detail
 		}
 		writeError(w, http.StatusBadRequest, "provider_rejected", message, 0)
 	default:
-		s.log.Error("upstream error", "status", resp.StatusCode, "detail", detail)
-		writeError(w, http.StatusBadGateway, "provider_error", "OpenRouter returned an error.", 0)
+		s.log.Error("upstream error", "provider", label, "status", resp.StatusCode, "detail", detail)
+		writeError(w, http.StatusBadGateway, "provider_error", label+" returned an error.", 0)
 	}
 }
 

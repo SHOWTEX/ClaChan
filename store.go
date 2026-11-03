@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   password_iters INTEGER NOT NULL,
   is_owner       INTEGER NOT NULL DEFAULT 0,
   default_model  TEXT NOT NULL DEFAULT '',
+  default_provider TEXT NOT NULL DEFAULT 'openrouter',
   ignored_providers TEXT NOT NULL DEFAULT '',
   persona_name   TEXT NOT NULL DEFAULT '',
   persona_prompt TEXT NOT NULL DEFAULT '',
@@ -91,12 +92,27 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL
 );`
 
+// schemaBackends stores one OpenAI-compatible local backend per profile.
+// api_key never leaves the server; the browser only sees hasKey.
+const schemaBackends = `
+CREATE TABLE IF NOT EXISTS profile_backends (
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  backend_id TEXT NOT NULL,
+  label      TEXT NOT NULL DEFAULT '',
+  base_url   TEXT NOT NULL DEFAULT '',
+  api_key    TEXT NOT NULL DEFAULT '',
+  model      TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (profile_id, backend_id)
+);`
+
 var schemaStatements = []string{
 	schemaConversations,
 	schemaMessages,
 	schemaProfiles,
 	schemaPrompts,
 	schemaSessions,
+	schemaBackends,
 	`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, seq);`,
 	`CREATE INDEX IF NOT EXISTS idx_prompts_profile ON prompts(profile_id, updated_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id);`,
@@ -159,12 +175,24 @@ type Profile struct {
 	Name             string `json:"name"`
 	IsOwner          bool   `json:"isOwner"`
 	DefaultModel     string `json:"defaultModel,omitempty"`
+	DefaultProvider  string `json:"defaultProvider,omitempty"`
 	IgnoredProviders string `json:"ignoredProviders,omitempty"`
 	PersonaName      string `json:"personaName,omitempty"`
 	PersonaPrompt    string `json:"personaPrompt,omitempty"`
 	UserName         string `json:"userName,omitempty"`
 	UserPersona      string `json:"userPersona,omitempty"`
 	CreatedAt        int64  `json:"createdAt"`
+}
+
+// ProfileBackend is one saved local backend. APIKey is populated only for
+// server-side use; it is never marshalled to the browser.
+type ProfileBackend struct {
+	BackendID string `json:"id"`
+	Label     string `json:"label,omitempty"`
+	BaseURL   string `json:"baseUrl"`
+	APIKey    string `json:"-"`
+	Model     string `json:"model,omitempty"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 // Prompt is a reusable prompt saved by one profile.
@@ -250,6 +278,7 @@ func openStore(path string) (*Store, error) {
 		declaration string
 	}{
 		{"default_model", "default_model TEXT NOT NULL DEFAULT ''"},
+		{"default_provider", "default_provider TEXT NOT NULL DEFAULT 'openrouter'"},
 		{"ignored_providers", "ignored_providers TEXT NOT NULL DEFAULT ''"},
 		{"persona_name", "persona_name TEXT NOT NULL DEFAULT ''"},
 		{"persona_prompt", "persona_prompt TEXT NOT NULL DEFAULT ''"},
@@ -402,7 +431,7 @@ func (s *Store) createProfile(ctx context.Context, name, hash, salt string, iter
 
 func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, is_owner, default_model, ignored_providers,
+		`SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
 		        persona_name, persona_prompt, user_name, user_persona, created_at
 		 FROM profiles ORDER BY created_at, name`)
 	if err != nil {
@@ -413,8 +442,9 @@ func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 	out := []Profile{}
 	for rows.Next() {
 		var p Profile
-		if err := rows.Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.IgnoredProviders,
-			&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider,
+			&p.IgnoredProviders, &p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona,
+			&p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -424,7 +454,7 @@ func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 
 func (s *Store) profileByID(ctx context.Context, id string) (*profileAuth, error) {
 	return s.scanProfileAuth(ctx, `
-		SELECT id, name, is_owner, default_model, ignored_providers,
+		SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
 		       persona_name, persona_prompt, user_name, user_persona, created_at,
 		       password_hash, password_salt, password_iters
 		FROM profiles WHERE id = ?`, id)
@@ -432,7 +462,7 @@ func (s *Store) profileByID(ctx context.Context, id string) (*profileAuth, error
 
 func (s *Store) profileByName(ctx context.Context, name string) (*profileAuth, error) {
 	return s.scanProfileAuth(ctx, `
-		SELECT id, name, is_owner, default_model, ignored_providers,
+		SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
 		       persona_name, persona_prompt, user_name, user_persona, created_at,
 		       password_hash, password_salt, password_iters
 		FROM profiles WHERE name = ? COLLATE NOCASE`, name)
@@ -441,7 +471,7 @@ func (s *Store) profileByName(ctx context.Context, name string) (*profileAuth, e
 func (s *Store) scanProfileAuth(ctx context.Context, query string, arg any) (*profileAuth, error) {
 	var p profileAuth
 	err := s.db.QueryRowContext(ctx, query, arg).Scan(
-		&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.IgnoredProviders,
+		&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider, &p.IgnoredProviders,
 		&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.CreatedAt,
 		&p.PasswordHash, &p.PasswordSalt, &p.PasswordIters,
 	)
@@ -471,9 +501,10 @@ func (s *Store) updateProfilePassword(ctx context.Context, profileID, hash, salt
 	return nil
 }
 
-func (s *Store) updateProfileDefaultModel(ctx context.Context, profileID, model string) error {
+func (s *Store) updateProfileDefaultModel(ctx context.Context, profileID, provider, model string) error {
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE profiles SET default_model = ? WHERE id = ?", model, profileID)
+		"UPDATE profiles SET default_provider = ?, default_model = ? WHERE id = ?",
+		provider, model, profileID)
 	if err != nil {
 		return err
 	}
@@ -626,6 +657,75 @@ func (s *Store) deletePrompt(ctx context.Context, profileID, id string) error {
 	return nil
 }
 
+/* ----------------------------------------------------------------- backends */
+
+func (s *Store) listProfileBackends(ctx context.Context, profileID string) ([]ProfileBackend, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT backend_id, label, base_url, api_key, model, updated_at
+		FROM profile_backends
+		WHERE profile_id = ?
+		ORDER BY backend_id`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []ProfileBackend{}
+	for rows.Next() {
+		var b ProfileBackend
+		if err := rows.Scan(&b.BackendID, &b.Label, &b.BaseURL, &b.APIKey, &b.Model, &b.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) profileBackend(ctx context.Context, profileID, backendID string) (*ProfileBackend, error) {
+	var b ProfileBackend
+	err := s.db.QueryRowContext(ctx, `
+		SELECT backend_id, label, base_url, api_key, model, updated_at
+		FROM profile_backends WHERE profile_id = ? AND backend_id = ?`, profileID, backendID).
+		Scan(&b.BackendID, &b.Label, &b.BaseURL, &b.APIKey, &b.Model, &b.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *Store) saveProfileBackend(ctx context.Context, profileID string, b ProfileBackend) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO profile_backends (profile_id, backend_id, label, base_url, api_key, model, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(profile_id, backend_id) DO UPDATE SET
+			label = excluded.label,
+			base_url = excluded.base_url,
+			api_key = excluded.api_key,
+			model = excluded.model,
+			updated_at = excluded.updated_at`,
+		profileID, b.BackendID, b.Label, b.BaseURL, b.APIKey, b.Model, nowMillis())
+	return err
+}
+
+func (s *Store) deleteProfileBackend(ctx context.Context, profileID, backendID string) error {
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM profile_backends WHERE profile_id = ? AND backend_id = ?", profileID, backendID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) createSession(ctx context.Context, profileID, tokenHash string, expiresAt int64) error {
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO sessions (token_hash, profile_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
@@ -636,12 +736,12 @@ func (s *Store) createSession(ctx context.Context, profileID, tokenHash string, 
 func (s *Store) sessionProfile(ctx context.Context, tokenHash string, now int64) (*Profile, error) {
 	var p Profile
 	err := s.db.QueryRowContext(ctx, `
-		SELECT p.id, p.name, p.is_owner, p.default_model, p.ignored_providers,
+		SELECT p.id, p.name, p.is_owner, p.default_model, p.default_provider, p.ignored_providers,
 		       p.persona_name, p.persona_prompt, p.user_name, p.user_persona, p.created_at
 		FROM sessions s
 		JOIN profiles p ON p.id = s.profile_id
 		WHERE s.token_hash = ? AND s.expires_at > ?`, tokenHash, now).
-		Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.IgnoredProviders,
+		Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider, &p.IgnoredProviders,
 			&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -882,6 +982,22 @@ func (s *Store) getConversation(ctx context.Context, profileID, id string) (*Con
 		c.Messages = append(c.Messages, m)
 	}
 	return &c, rows.Err()
+}
+
+// conversationProvider returns just the provider ID for one conversation. It
+// exists so a settings PATCH can validate a model without loading the whole
+// transcript.
+func (s *Store) conversationProvider(ctx context.Context, profileID, id string) (string, error) {
+	var provider string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT provider FROM conversations WHERE profile_id = ? AND id = ?", profileID, id).Scan(&provider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return provider, nil
 }
 
 // updateConversation applies only the fields that are non-nil. SQL fragments

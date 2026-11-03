@@ -31,6 +31,10 @@ type Provider struct {
 	Referer      string
 	AppTitle     string
 	DefaultModel string
+	// Wire is "responses" for OpenRouter and "chat" for OpenAI-compatible
+	// local servers.
+	Wire  string
+	Local bool
 }
 
 func newProviders(cfg *Config) map[string]*Provider {
@@ -42,15 +46,24 @@ func newProviders(cfg *Config) map[string]*Provider {
 		Referer:      cfg.Referer,
 		AppTitle:     cfg.AppTitle,
 		DefaultModel: cfg.DefaultModel,
+		Wire:         "responses",
 	}
 	return map[string]*Provider{p.ID: p}
 }
 
-func (p *Provider) enabled() bool { return p.APIKey != "" }
+func (p *Provider) enabled() bool {
+	if p.Local {
+		return strings.TrimSpace(p.BaseURL) != ""
+	}
+	return p.APIKey != ""
+}
 
 func (p *Provider) headers(req *http.Request) {
 	if p.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	}
+	if p.Local {
+		return
 	}
 	if p.Referer != "" {
 		req.Header.Set("HTTP-Referer", p.Referer)
