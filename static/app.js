@@ -1971,6 +1971,15 @@
     paintTimer = null;
 
     const keepPinned = state.pinned;
+
+    // Reasoning blocks are rebuilt on every structure paint, including while
+    // reasoning streams in. Remember which ones the reader opened so a repaint
+    // does not snap them shut.
+    const openReasoning = new Set();
+    for (const node of dom.messages.querySelectorAll("details.reasoning-block[open]")) {
+      if (node.dataset.key) openReasoning.add(node.dataset.key);
+    }
+
     dom.messages.replaceChildren();
 
     const messages = (state.current && state.current.messages) || [];
@@ -1979,8 +1988,17 @@
       return;
     }
 
-    for (const message of messages) {
-      dom.messages.append(messageNode(message));
+    messages.forEach((message, index) => {
+      // Prefer the saved message ID so the key survives list changes; fall back
+      // to the position for drafts that have not been persisted yet.
+      const key = message.id ? "id:" + message.id : "m" + index;
+      dom.messages.append(messageNode(message, key));
+    });
+
+    if (openReasoning.size) {
+      for (const node of dom.messages.querySelectorAll("details.reasoning-block[data-key]")) {
+        if (openReasoning.has(node.dataset.key)) node.open = true;
+      }
     }
 
     if (options.stick || keepPinned) scrollToBottom(true);
@@ -2123,10 +2141,11 @@
     return details;
   }
 
-  function reasoningBlock(text, hint) {
+  function reasoningBlock(text, hint, key) {
     const value = String(text || "").trim();
     if (!value) return null;
     const details = el("details", "reasoning-block");
+    if (key) details.dataset.key = key;
     const summary = el("summary");
     summary.append(el("span", "reasoning-title", "Reasoning"));
     summary.append(el("span", "reasoning-hint", hint || "Show thoughts"));
@@ -2143,7 +2162,7 @@
     return (ms / 1000).toFixed(1).replace(/\.0$/, "") + " s";
   }
 
-  function stepCard(step, position) {
+  function stepCard(step, position, key) {
     const card = el("section", "step-card");
     if (step.status && step.status !== "completed") card.classList.add("step-unfinished");
 
@@ -2158,7 +2177,7 @@
     if (duration) head.append(el("span", "step-duration", duration));
     card.append(head);
 
-    const reasoning = reasoningBlock(step.reasoning);
+    const reasoning = reasoningBlock(step.reasoning, "", key ? key + ":reasoning" : "");
     if (reasoning) card.append(reasoning);
 
     if (step.arguments) {
@@ -2190,7 +2209,7 @@
     return card;
   }
 
-  function answerCard(message, position) {
+  function answerCard(message, position, key) {
     const card = el("section", "step-card step-answer");
     const head = el("div", "step-head");
     head.append(el("span", "step-num", String(position)));
@@ -2200,7 +2219,7 @@
     }
     card.append(head);
 
-    const reasoning = reasoningBlock(message.reasoning);
+    const reasoning = reasoningBlock(message.reasoning, "", key ? key + ":answer" : "");
     if (reasoning) card.append(reasoning);
 
     const body = el("div", "md");
@@ -2227,9 +2246,10 @@
     return wrap;
   }
 
-  function messageNode(message) {
+  function messageNode(message, key) {
     const article = el("article", "msg msg-" + message.role);
     if (message.id) article.dataset.id = message.id;
+    const reasoningKey = key || "";
 
     if (message.role === "user") {
       const bubble = el("div", "bubble");
@@ -2251,9 +2271,11 @@
       const steps = Array.isArray(message.steps) ? message.steps : [];
       if (steps.length) {
         const list = el("div", "step-list");
-        steps.forEach((step, index) => list.append(stepCard(step, index + 1)));
+        steps.forEach((step, index) => list.append(
+          stepCard(step, index + 1, reasoningKey + ":step" + (index + 1)),
+        ));
         if (message.content || message.reasoning || (message.streaming && message === state.streamingMsg)) {
-          list.append(answerCard(message, steps.length + 1));
+          list.append(answerCard(message, steps.length + 1, reasoningKey + ":answer"));
         }
         article.append(list);
         if (!message.content && !message.reasoning) {
@@ -2261,7 +2283,7 @@
           if (extras) article.append(extras);
         }
       } else {
-        const reasoning = reasoningBlock(message.reasoning);
+        const reasoning = reasoningBlock(message.reasoning, "", reasoningKey ? reasoningKey + ":reasoning" : "");
         if (reasoning) article.append(reasoning);
         const body = el("div", "md");
         body.replaceChildren(renderMarkdown(message.content));
