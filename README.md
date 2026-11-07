@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.0.8-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -74,8 +74,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.0.8` (Linux) or
-`-Release v1.0.8` (Windows).
+To pin a version, download the installer and pass `--release v1.1.0` (Linux) or
+`-Release v1.1.0` (Windows).
 
 ## Uninstall
 
@@ -135,7 +135,8 @@ Uninstall keeps each platform's configuration and database by default. Add
   viewer, download, and print/save-as-PDF
 - Export a conversation as Markdown or JSON, or print it to PDF; import a JSON
   export back into the signed-in profile
-- Edit, regenerate, delete, and copy message actions
+- Edit, regenerate, delete, and copy message actions, including in-place edits
+  for both roles and branching a chat from any message
 - Rename, delete, and switch conversations from a sidebar
 - Per-conversation system prompt
 - Works on a phone over the LAN: off-canvas sidebar, touch targets, safe areas
@@ -193,7 +194,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.0.8" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.1.0" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -202,7 +203,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.0.8" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.1.0" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -371,8 +372,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.0.8 -m "v1.0.8"
-git push origin v1.0.8
+git tag -a v1.1.0 -m "v1.1.0"
+git push origin v1.1.0
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
@@ -403,6 +404,8 @@ Session required:
 | `GET` | `/api/conversations/{id}` | Full history, including reasoning, tool steps, citations, and tool summaries. |
 | `PATCH` | `/api/conversations/{id}` | Rename, system prompt, provider/model, provider routing, or tool/reasoning settings (`toolsEnabled`, `maxToolCalls`, `reasoningEffort`). |
 | `DELETE` | `/api/conversations/{id}` | Delete a conversation and its messages. |
+| `POST` | `/api/conversations/{id}/branch` | Copy the conversation up to and including `messageId` into a new conversation and return it. |
+| `PATCH` | `/api/messages/{id}` | Edit a message's `content` in place without regenerating. |
 | `DELETE` | `/api/messages/{id}` | Delete one message. |
 | `GET` | `/api/prompts` | List this profile's saved prompts. |
 | `POST` | `/api/prompts` | Create a prompt (`title`, `body`, optional `system`). |
@@ -459,6 +462,12 @@ must send a request body and read the stream with `fetch`.
   entered once per profile.
 - **Default model is per profile.** Set it in Settings; it applies to new chats
   and syncs across devices. Existing conversations keep their own model.
+- **Editing and branching.** The pencil on any message edits it in place; the
+  edited text becomes the history the next turn is built from, and later
+  messages are kept. On a user message, **Save & resend** still truncates the
+  transcript at that point and streams a fresh reply. The branch button copies
+  the conversation up to and including the chosen message into a new chat with
+  the same provider, model, prompt, routing, tool, and reasoning settings.
 - **Local backends are per profile and text-only.** Settings → Backends stores an
   address, optional API key, and default model for KoboldCpp, Ollama, LM Studio,
   llama.cpp, or a custom OpenAI-compatible server. Clachan normalises the address

@@ -1705,55 +1705,62 @@
 
     try {
       const conversation = await api("/api/conversations/" + encodeURIComponent(id));
-      state.current = {
-        ...conversation,
-        messages: Array.isArray(conversation.messages) ? conversation.messages : [],
-      };
-      state.provider = conversation.provider || state.provider;
-      state.model = conversation.model || state.model;
-      rememberModel(state.provider, state.model);
-      state.providerSort = conversation.providerSort || "";
-      state.providerOnly = conversation.providerOnly || "";
-      state.allowFallbacks = conversation.allowFallbacks !== false;
-      state.toolsEnabled = conversation.toolsEnabled !== false;
-      state.maxToolCalls = clampToolCalls(conversation.maxToolCalls || 6);
-      state.reasoningEffort = typeof conversation.reasoningEffort === "string" ? conversation.reasoningEffort : "";
-      setPref(pkey(PREFS.toolsEnabled), state.toolsEnabled ? "1" : "0");
-      setPref(pkey(PREFS.maxToolCalls), String(state.maxToolCalls));
-      setPref(pkey(PREFS.reasoningEffort), state.reasoningEffort);
-      if (state.providerOnly && isIgnoredTag(state.providerOnly)) {
-        state.providerSort = "";
-        state.providerOnly = "";
-        state.allowFallbacks = true;
-        persistConversationSettings({ providerSort: "", providerOnly: "", allowFallbacks: true });
-      }
-      state.pinned = true;
-      state.autoRetried = false;
-      clearRetry();
-      clearAttachments();
-
-      setPref(pkey(PREFS.lastConversation), id);
-
-      updateModelTrigger();
-      updateRoutingTrigger();
-      updateNotice();
-      updateHeading();
-      renderToolBar();
-      renderMessages({ stick: true });
-      renderConversations();
-      closeSidebar();
-
-      if (isLocalProvider(state.provider)) {
-        ensureLocalModels(state.provider).then(() => {
-          updateModelTrigger();
-          updateNotice();
-        });
-      }
-
-      if (!fromBoot) dom.input.focus();
+      adoptConversation(conversation, { fromBoot });
     } catch (err) {
       toast(err.message);
     }
+  }
+
+  // adoptConversation makes a loaded conversation the active one and syncs all
+  // of the per-chat controls. Branching reuses it so a new branch behaves
+  // exactly like a conversation opened from the sidebar.
+  function adoptConversation(conversation, options = {}) {
+    state.current = {
+      ...conversation,
+      messages: Array.isArray(conversation.messages) ? conversation.messages : [],
+    };
+    state.provider = conversation.provider || state.provider;
+    state.model = conversation.model || state.model;
+    rememberModel(state.provider, state.model);
+    state.providerSort = conversation.providerSort || "";
+    state.providerOnly = conversation.providerOnly || "";
+    state.allowFallbacks = conversation.allowFallbacks !== false;
+    state.toolsEnabled = conversation.toolsEnabled !== false;
+    state.maxToolCalls = clampToolCalls(conversation.maxToolCalls || 6);
+    state.reasoningEffort = typeof conversation.reasoningEffort === "string" ? conversation.reasoningEffort : "";
+    setPref(pkey(PREFS.toolsEnabled), state.toolsEnabled ? "1" : "0");
+    setPref(pkey(PREFS.maxToolCalls), String(state.maxToolCalls));
+    setPref(pkey(PREFS.reasoningEffort), state.reasoningEffort);
+    if (state.providerOnly && isIgnoredTag(state.providerOnly)) {
+      state.providerSort = "";
+      state.providerOnly = "";
+      state.allowFallbacks = true;
+      persistConversationSettings({ providerSort: "", providerOnly: "", allowFallbacks: true });
+    }
+    state.pinned = true;
+    state.autoRetried = false;
+    clearRetry();
+    clearAttachments();
+
+    setPref(pkey(PREFS.lastConversation), state.current.id);
+
+    updateModelTrigger();
+    updateRoutingTrigger();
+    updateNotice();
+    updateHeading();
+    renderToolBar();
+    renderMessages({ stick: true });
+    renderConversations();
+    closeSidebar();
+
+    if (isLocalProvider(state.provider)) {
+      ensureLocalModels(state.provider).then(() => {
+        updateModelTrigger();
+        updateNotice();
+      });
+    }
+
+    if (!options.fromBoot) dom.input.focus();
   }
 
   function newChat(options = {}) {
@@ -2318,12 +2325,18 @@
 
     const realID = message.id && !String(message.id).startsWith("tmp-");
 
-    if (message.role === "user" && realID) {
+    if (realID) {
       const edit = iconButton("i-edit", "Edit message", "msg-action");
       edit.addEventListener("click", () => beginEditMessage(message));
+      const branch = iconButton("i-branch", "Branch chat from here", "msg-action");
+      branch.addEventListener("click", () => branchFromMessage(message));
+      bar.append(edit, branch);
+    }
+
+    if (message.role === "user" && realID) {
       const remove = iconButton("i-trash", "Delete message", "msg-action");
       remove.addEventListener("click", () => deleteMessage(message));
-      bar.append(edit, remove);
+      bar.append(remove);
     }
 
     if (message.role === "assistant" && realID && !state.streaming) {
@@ -2421,13 +2434,22 @@
   }
 
   function beginEditMessage(message) {
-    if (state.streaming) return;
+    if (state.streaming) {
+      toast("Stop the current reply first.");
+      return;
+    }
     const article = findArticle(message);
     if (!article) return;
-    const target = article.querySelector(".bubble");
+
+    const isUser = message.role === "user";
+    // User text lives in the bubble; assistant text is the last rendered
+    // Markdown body, which is the answer card when the reply used tools.
+    const target = isUser
+      ? article.querySelector(".bubble")
+      : [...article.querySelectorAll(".md")].pop();
     if (!target) return;
 
-    const form = el("form", "edit-box");
+    const form = el("form", "edit-box" + (isUser ? "" : " edit-box-assistant"));
     const input = el("textarea", "edit-input");
     input.value = message.content;
     input.rows = Math.min(10, Math.max(3, message.content.split("\n").length));
@@ -2436,20 +2458,78 @@
     const cancel = el("button", "btn btn-quiet", "Cancel");
     cancel.type = "button";
     cancel.addEventListener("click", () => renderMessages());
-    const save = el("button", "btn btn-primary", "Save & resend");
+
+    const save = el("button", "btn btn-primary", "Save");
     save.type = "submit";
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      saveEditMessage(message, input.value);
+      saveMessageInPlace(message, input.value);
     });
 
-    actions.append(cancel, save);
+    actions.append(cancel);
+
+    if (isUser) {
+      const resend = el("button", "btn btn-quiet", "Save & resend");
+      resend.type = "button";
+      resend.addEventListener("click", () => saveEditMessage(message, input.value));
+      actions.append(resend);
+    }
+
+    actions.append(save);
     form.append(input, actions);
     target.replaceWith(form);
 
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  // saveMessageInPlace edits a message without starting a generation. The
+  // server keeps the rest of the transcript, so the new text is simply the
+  // history the next turn is built from.
+  async function saveMessageInPlace(message, raw) {
+    const text = String(raw || "").trim();
+    if (!text || state.streaming || !state.current || !state.current.id) return;
+
+    try {
+      const saved = await api("/api/messages/" + encodeURIComponent(message.id), {
+        method: "PATCH",
+        body: { content: text },
+      });
+      message.content = saved.content;
+      message.failed = null;
+      if (saved.title && state.current) {
+        state.current.title = saved.title;
+        updateHeading();
+      }
+      renderMessages();
+      scheduleConversationRefresh();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  // branchFromMessage copies the chat up to the chosen message into a new
+  // conversation and switches to it.
+  async function branchFromMessage(message) {
+    if (state.streaming) {
+      toast("Stop the current reply first.");
+      return;
+    }
+    if (!state.current || !state.current.id) return;
+    if (!message.id || String(message.id).startsWith("tmp-")) return;
+
+    try {
+      const conversation = await api(
+        "/api/conversations/" + encodeURIComponent(state.current.id) + "/branch",
+        { method: "POST", body: { messageId: message.id } },
+      );
+      adoptConversation(conversation);
+      await loadConversations(true);
+      toast("Branched into a new chat.");
+    } catch (err) {
+      toast(err.message);
+    }
   }
 
   async function deleteMessage(message) {

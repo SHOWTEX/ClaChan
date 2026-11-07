@@ -1231,6 +1231,192 @@ func (s *Store) editUserMessage(ctx context.Context, profileID, convID, msgID, c
 	return title, nil
 }
 
+// editMessage updates a message's text in place without touching the rest of
+// the transcript. The edited text becomes the history the model sees on the
+// next turn. Returns the conversation title and ErrNotFound when the message is
+// not in this profile.
+func (s *Store) editMessage(ctx context.Context, profileID, msgID, content string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var convID, role, oldContent, title string
+	var seq int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT m.conversation_id, m.role, m.content, m.seq, c.title
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE m.id = ? AND c.profile_id = ?`, msgID, profileID).
+		Scan(&convID, &role, &oldContent, &seq, &title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE messages SET content = ? WHERE id = ? AND conversation_id = ?",
+		content, msgID, convID); err != nil {
+		return "", err
+	}
+
+	// Keep an auto-derived title in step with the first user message. A title
+	// the user renamed by hand will not match deriveTitle and is left alone.
+	if role == "user" && seq == 1 && title == deriveTitle(oldContent) {
+		title = deriveTitle(content)
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE conversations SET title = ? WHERE id = ?", title, convID); err != nil {
+			return "", err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE conversations SET updated_at = ? WHERE id = ?", nowMillis(), convID); err != nil {
+		return "", err
+	}
+	return title, tx.Commit()
+}
+
+// branchConversation copies a conversation up to and including messageID into a
+// new conversation. The copy keeps the source's provider, model, prompt,
+// routing, tool, and reasoning settings, and gets fresh message IDs.
+func (s *Store) branchConversation(ctx context.Context, profileID, sourceID, messageID string) (*Conversation, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var src Conversation
+	err = tx.QueryRowContext(ctx, `
+		SELECT title, provider, model, system_prompt, provider_sort, provider_only,
+		       allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort
+		FROM conversations WHERE id = ? AND profile_id = ?`, sourceID, profileID).
+		Scan(&src.Title, &src.Provider, &src.Model, &src.SystemPrompt,
+			&src.ProviderSort, &src.ProviderOnly, &src.AllowFallbacks,
+			&src.ToolsEnabled, &src.MaxToolCalls, &src.ReasoningEffort)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var cutoff int64
+	err = tx.QueryRowContext(ctx,
+		"SELECT seq FROM messages WHERE id = ? AND conversation_id = ?",
+		messageID, sourceID).Scan(&cutoff)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	now := nowMillis()
+	c := &Conversation{
+		ID:              newID(),
+		Title:           branchTitle(src.Title),
+		Provider:        src.Provider,
+		Model:           src.Model,
+		SystemPrompt:    src.SystemPrompt,
+		ProviderSort:    src.ProviderSort,
+		ProviderOnly:    src.ProviderOnly,
+		AllowFallbacks:  src.AllowFallbacks,
+		ToolsEnabled:    src.ToolsEnabled,
+		MaxToolCalls:    src.MaxToolCalls,
+		ReasoningEffort: src.ReasoningEffort,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO conversations (id, profile_id, title, provider, model, system_prompt, provider_sort, provider_only, allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, profileID, c.Title, c.Provider, c.Model, c.SystemPrompt,
+		c.ProviderSort, c.ProviderOnly, boolInt(c.AllowFallbacks),
+		boolInt(c.ToolsEnabled), c.MaxToolCalls, c.ReasoningEffort, c.CreatedAt, c.UpdatedAt); err != nil {
+		return nil, err
+	}
+
+	// Read the source rows first and close the cursor before inserting. The
+	// store runs on a single SQLite connection, so an open cursor would block
+	// the writes below.
+	type branchRow struct {
+		role, content, attachments, citations, toolRun, reasoning, steps string
+		seq, createdAt                                                   int64
+	}
+	var copied []branchRow
+	rows, err := tx.QueryContext(ctx, `
+		SELECT role, content, attachments, citations, tool_run, reasoning, steps, seq, created_at
+		FROM messages WHERE conversation_id = ? AND seq <= ?
+		ORDER BY seq`, sourceID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var r branchRow
+		if err := rows.Scan(&r.role, &r.content, &r.attachments, &r.citations,
+			&r.toolRun, &r.reasoning, &r.steps, &r.seq, &r.createdAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		copied = append(copied, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	c.Messages = make([]Message, 0, len(copied))
+	for _, r := range copied {
+		id := newID()
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO messages (id, conversation_id, role, content, attachments, citations, tool_run, reasoning, steps, seq, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.ID, r.role, r.content, r.attachments, r.citations,
+			r.toolRun, r.reasoning, r.steps, r.seq, r.createdAt); err != nil {
+			return nil, err
+		}
+
+		m := Message{ID: id, Role: r.role, Content: r.content, Reasoning: r.reasoning, CreatedAt: r.createdAt}
+		if err := json.Unmarshal([]byte(r.attachments), &m.Attachments); err != nil {
+			return nil, fmt.Errorf("decode message attachments: %w", err)
+		}
+		if err := json.Unmarshal([]byte(r.citations), &m.Citations); err != nil {
+			return nil, fmt.Errorf("decode message citations: %w", err)
+		}
+		if r.toolRun != "" {
+			if err := json.Unmarshal([]byte(r.toolRun), &m.ToolRun); err != nil {
+				return nil, fmt.Errorf("decode message tool run: %w", err)
+			}
+		}
+		if r.steps != "" {
+			if err := json.Unmarshal([]byte(r.steps), &m.Steps); err != nil {
+				return nil, fmt.Errorf("decode message steps: %w", err)
+			}
+		}
+		c.Messages = append(c.Messages, m)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	c.MessageCount = len(c.Messages)
+	if len(c.Messages) > 0 {
+		last := c.Messages[len(c.Messages)-1]
+		c.Preview = previewText(last.Content)
+		if c.Preview == "" && len(last.Attachments) > 0 {
+			c.Preview = "[attachment]"
+		}
+	}
+	return c, nil
+}
+
 // saveAssistant writes the buffered reply once. For a regenerate it updates
 // the existing row; if that row vanished (deleted from another tab) it inserts
 // under the same id rather than losing the reply.
@@ -1327,6 +1513,25 @@ func deriveTitle(content string) string {
 	runes := []rune(title)
 	if len(runes) > 60 {
 		return strings.TrimSpace(string(runes[:60])) + "…"
+	}
+	return title
+}
+
+// branchTitle names a branched conversation after its source, capped at the
+// same 200-rune limit as a user-set title. Branching a branch does not stack
+// another "Branch:" prefix.
+func branchTitle(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" || source == "New chat" {
+		return "Branch"
+	}
+	title := source
+	if !strings.HasPrefix(title, "Branch: ") {
+		title = "Branch: " + title
+	}
+	runes := []rune(title)
+	if len(runes) > 200 {
+		return strings.TrimSpace(string(runes[:199])) + "…"
 	}
 	return title
 }

@@ -1953,6 +1953,11 @@ a {
   margin-left: auto;
 }
 
+.edit-box-assistant {
+  max-width: 100%;
+  margin-left: 0;
+}
+
 .edit-input {
   width: 100%;
   min-height: 84px;

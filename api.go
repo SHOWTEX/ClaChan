@@ -745,6 +745,81 @@ func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleUpdateMessage edits a message in place. It never starts a generation:
+// the edited text simply becomes the history the next turn is built from.
+func (s *Server) handleUpdateMessage(w http.ResponseWriter, r *http.Request) {
+	profile := currentProfile(r)
+	if profile == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue.", 0)
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
+		return
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "A message cannot be empty.", 0)
+		return
+	}
+	if len(content) > maxMessageBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "bad_request", "That message is too long.", 0)
+		return
+	}
+
+	id := r.PathValue("id")
+	title, err := s.store.editMessage(r.Context(), profile.ID, id, content)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Message not found.", 0)
+		return
+	}
+	if err != nil {
+		s.log.Error("edit message", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not save the message.", 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "content": content, "title": title})
+}
+
+// handleBranchConversation copies a conversation up to a chosen message into a
+// new conversation and returns the full new transcript.
+func (s *Server) handleBranchConversation(w http.ResponseWriter, r *http.Request) {
+	profile := currentProfile(r)
+	if profile == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue.", 0)
+		return
+	}
+
+	var req struct {
+		MessageID string `json:"messageId"`
+	}
+	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
+		return
+	}
+	messageID := strings.TrimSpace(req.MessageID)
+	if messageID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "messageId is required.", 0)
+		return
+	}
+
+	conv, err := s.store.branchConversation(r.Context(), profile.ID, r.PathValue("id"), messageID)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Conversation or message not found.", 0)
+		return
+	}
+	if err != nil {
+		s.log.Error("branch conversation", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not branch the conversation.", 0)
+		return
+	}
+	writeJSON(w, http.StatusCreated, conv)
+}
+
 func (s *Server) handleListPrompts(w http.ResponseWriter, r *http.Request) {
 	profile := currentProfile(r)
 	if profile == nil {

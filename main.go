@@ -21,7 +21,7 @@ import (
 var staticFiles embed.FS
 
 // version is set at build time with -X main.version for tagged releases.
-var version = "1.0.8"
+var version = "1.1.0"
 
 const (
 	// maxStreams is a hard cap. A third concurrent generation is rejected with
@@ -174,6 +174,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/conversations/{id}", s.requireSession(s.handleGetConversation))
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.requireSession(s.handleUpdateConversation))
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.requireSession(s.handleDeleteConversation))
+	mux.HandleFunc("POST /api/conversations/{id}/branch", s.requireSession(s.handleBranchConversation))
+	mux.HandleFunc("PATCH /api/messages/{id}", s.requireSession(s.handleUpdateMessage))
 	mux.HandleFunc("DELETE /api/messages/{id}", s.requireSession(s.handleDeleteMessage))
 	mux.HandleFunc("POST /api/chat", s.requireSession(s.handleChat))
 
