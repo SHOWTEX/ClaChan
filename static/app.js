@@ -273,6 +273,52 @@
     }, 2800);
   }
 
+  /* ---------------------------------------------------------------- favicon */
+
+  // The tab icon doubles as a status light: tan when idle, orange while a
+  // reply streams, and green once a reply is ready while the tab is in the
+  // background. The mark is a centred stroked "C" so it still reads at 16px.
+  const FAVICON_COLORS = {
+    idle: "#d9a066",
+    working: "#f0883e",
+    ready: "#3fb950",
+  };
+
+  function faviconData(color) {
+    const svg =
+      "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>" +
+      "<rect width='32' height='32' rx='9' fill='" + color + "'/>" +
+      "<path d='M22.12 10.26A7.5 7.5 0 1 0 22.12 21.74' fill='none' stroke='#14161a' stroke-width='3.4' stroke-linecap='round'/>" +
+      "</svg>";
+    return "data:image/svg+xml," + encodeURIComponent(svg);
+  }
+
+  const FAVICONS = {
+    idle: faviconData(FAVICON_COLORS.idle),
+    working: faviconData(FAVICON_COLORS.working),
+    ready: faviconData(FAVICON_COLORS.ready),
+  };
+
+  let faviconState = "idle";
+
+  function setFavicon(next) {
+    if (!FAVICONS[next] || faviconState === next) return;
+    const link = document.querySelector('link[rel="icon"]');
+    if (!link) return;
+    link.href = FAVICONS[next];
+    faviconState = next;
+  }
+
+  function tabInBackground() {
+    return document.visibilityState === "hidden" || !document.hasFocus();
+  }
+
+  // Drop the green "ready" light as soon as the user looks at the tab again.
+  function clearReadyFavicon() {
+    if (faviconState !== "ready") return;
+    setFavicon(state.streaming ? "working" : "idle");
+  }
+
   const THEMES = ["dark", "light", "midnight", "midnight-purple", "forest", "sepia"];
 
   // Shared capability notes appended to every built-in preset. Keep these in
@@ -2731,11 +2777,13 @@
     state.streaming = true;
     state.streamingMsg = assistant;
     setBusy(true);
+    setFavicon("working");
 
     const controller = new AbortController();
     state.abort = controller;
     let gotMeta = false;
     let gotDone = false;
+    let finishedOK = false;
 
     const local = isLocalProvider(state.provider);
     const requestBody = {
@@ -2829,8 +2877,9 @@
       } else if (!assistant.content && !(assistant.steps || []).length && !assistant.reasoning) {
         removeMessage(assistant);
         toast(emptyReplyMessage(assistant.finishReason));
-      } else if (assistant.saved === false) {
-        toast("The reply streamed but could not be saved.");
+      } else {
+        finishedOK = true;
+        if (assistant.saved === false) toast("The reply streamed but could not be saved.");
       }
     } catch (err) {
       if (err && err.name === "AbortError") {
@@ -2856,6 +2905,9 @@
       state.abort = null;
       state.streamingMsg = null;
       setBusy(false);
+      // Only light the tab green when the reply landed and nobody is looking;
+      // an aborted, empty, or partial stream just returns to idle.
+      setFavicon(finishedOK && tabInBackground() ? "ready" : "idle");
       renderMessages();
       scheduleConversationRefresh();
     }
@@ -5119,6 +5171,11 @@
     }
 
     window.addEventListener("online", () => toast("Back online"));
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") clearReadyFavicon();
+    });
+    window.addEventListener("focus", clearReadyFavicon);
   }
 
   init().catch((err) => {
