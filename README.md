@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -74,8 +74,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.1.0` (Linux) or
-`-Release v1.1.0` (Windows).
+To pin a version, download the installer and pass `--release v1.1.1` (Linux) or
+`-Release v1.1.1` (Windows).
 
 ## Uninstall
 
@@ -104,6 +104,8 @@ Uninstall keeps each platform's configuration and database by default. Add
 
 - Streaming chat with OpenRouter (SSE, flushed per frame, so tokens appear as
   they arrive)
+- A tab favicon that doubles as a status light: orange while a reply streams and
+  green once it lands while the tab is in the background
 - Optional local backends: KoboldCpp, Ollama, LM Studio, llama.cpp, or any
   OpenAI-compatible server on your LAN, configured per profile and proxied
   through the server so the browser never needs CORS access to them
@@ -194,7 +196,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.1.0" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.1.1" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -203,7 +205,7 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.1.0" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.1.1" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
@@ -372,8 +374,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.1.0 -m "v1.1.0"
-git push origin v1.1.0
+git tag -a v1.1.1 -m "v1.1.1"
+git push origin v1.1.1
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
