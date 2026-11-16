@@ -345,7 +345,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		serverTools = buildServerTools(toolsEnabled, timezone)
+		serverTools = buildServerTools(toolsEnabled, timezone, toolCalls)
 		if info := s.models.lookup(provider.ID, model); info != nil && info.SupportsReasoning {
 			reasoning = &reasoningRequest{Summary: "auto"}
 			if reasoningEffort != "" {

@@ -349,6 +349,7 @@ func TestChatSendsServerToolsAndCapturesCitations(t *testing.T) {
 		`"openrouter:web_fetch"`,
 		`"openrouter:experimental__search_models"`,
 		`"max_tool_calls":7`,
+		`"max_uses":7`,
 	} {
 		if !strings.Contains(gotBody, want) {
 			t.Fatalf("upstream body missing %q:\n%s", want, gotBody)

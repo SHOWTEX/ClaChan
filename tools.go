@@ -59,10 +59,17 @@ type serverTool struct {
 
 // buildServerTools always includes free, low-risk tools. Web search and fetch
 // follow the user's per-chat switch.
-func buildServerTools(webEnabled bool, timezone string) []serverTool {
+//
+// maxCalls is applied twice on purpose. The request-level max_tool_calls only
+// bounds agent rounds, and a model can fan several searches out inside one
+// round, so on its own it lets a reply exceed the number the user picked.
+// max_uses is the per-tool budget OpenRouter enforces on executed searches and
+// fetches, which is what the "Max calls" control actually promises.
+func buildServerTools(webEnabled bool, timezone string, maxCalls int) []serverTool {
 	if !validTimezone(timezone) {
 		timezone = "UTC"
 	}
+	maxCalls = clampToolCalls(maxCalls)
 	tools := []serverTool{
 		{
 			Type:       "openrouter:datetime",
@@ -80,9 +87,13 @@ func buildServerTools(webEnabled bool, timezone string) []serverTool {
 				Parameters: map[string]any{
 					"max_results":       5,
 					"max_total_results": 20,
+					"max_uses":          maxCalls,
 				},
 			},
-			serverTool{Type: "openrouter:web_fetch"},
+			serverTool{
+				Type:       "openrouter:web_fetch",
+				Parameters: map[string]any{"max_uses": maxCalls},
+			},
 		)
 	}
 	return tools
