@@ -330,3 +330,170 @@ func TestMessageEditAndBranchHandlers(t *testing.T) {
 		t.Fatalf("branch from another profile = %d, want 404", code)
 	}
 }
+
+func TestStoreDeleteMessageStepAndClearAnswer(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	profile := createTestProfile(t, s, "Owner", true)
+
+	conv, err := s.createConversation(ctx, profile.ID, providerOpenRouter,
+		"test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+	if _, _, err := s.appendUserMessage(ctx, profile.ID, conv.ID,
+		providerOpenRouter, "test/model", "question", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+
+	steps := []ChatStep{
+		{
+			ID: "step-a", Tool: "web_search", Query: "first", Status: "completed",
+			Result:  `{"query":"first"}`,
+			Sources: []Citation{{URL: "https://a.example", Title: "A"}},
+		},
+		{
+			ID: "step-b", Tool: "web_fetch", Status: "completed",
+			Result:  `{"url":"https://b.example"}`,
+			Sources: []Citation{{URL: "https://b.example", Title: "B"}},
+		},
+	}
+	citations := []Citation{
+		{URL: "https://a.example", Title: "A"},
+		{URL: "https://b.example", Title: "B"},
+	}
+	run := &ToolRun{Enabled: true, MaxCalls: 5, Calls: 2, Searches: 1, Activities: activitiesFromSteps(steps)}
+	assistantID := newID()
+	if err := s.saveAssistant(ctx, profile.ID, conv.ID, assistantID,
+		"the answer", "the reasoning", steps, citations, run, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	updated, err := s.deleteMessageStep(ctx, profile.ID, assistantID, "step-a")
+	if err != nil {
+		t.Fatalf("deleteMessageStep: %v", err)
+	}
+	if len(updated.Steps) != 1 || updated.Steps[0].ID != "step-b" {
+		t.Fatalf("steps = %+v, want only step-b", updated.Steps)
+	}
+	if len(updated.Citations) != 1 || updated.Citations[0].URL != "https://b.example" {
+		t.Fatalf("citations = %+v, want only b.example", updated.Citations)
+	}
+	if updated.ToolRun == nil || updated.ToolRun.Calls != 1 || updated.ToolRun.Searches != 0 {
+		t.Fatalf("tool run = %+v, want 1 call and no searches", updated.ToolRun)
+	}
+
+	stored, err := s.getConversation(ctx, profile.ID, conv.ID)
+	if err != nil {
+		t.Fatalf("getConversation: %v", err)
+	}
+	last := stored.Messages[len(stored.Messages)-1]
+	if len(last.Steps) != 1 || last.Steps[0].ID != "step-b" {
+		t.Fatalf("stored steps = %+v", last.Steps)
+	}
+	if last.Content != "the answer" || last.Reasoning != "the reasoning" {
+		t.Fatalf("deleting a step must not touch the answer: %+v", last)
+	}
+
+	other := createTestProfile(t, s, "Other", false)
+	if _, err := s.deleteMessageStep(ctx, other.ID, assistantID, "step-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete step from another profile = %v, want ErrNotFound", err)
+	}
+	if _, err := s.deleteMessageStep(ctx, profile.ID, assistantID, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing step = %v, want ErrNotFound", err)
+	}
+	if _, err := s.deleteMessageStep(ctx, profile.ID, "missing", "step-b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete step on missing message = %v, want ErrNotFound", err)
+	}
+
+	cleared, err := s.clearMessageAnswer(ctx, profile.ID, assistantID)
+	if err != nil {
+		t.Fatalf("clearMessageAnswer: %v", err)
+	}
+	if cleared.Content != "" || cleared.Reasoning != "" {
+		t.Fatalf("cleared answer = %q / %q, want empty", cleared.Content, cleared.Reasoning)
+	}
+	if len(cleared.Steps) != 1 || cleared.Steps[0].ID != "step-b" {
+		t.Fatalf("clearing the answer must keep the steps: %+v", cleared.Steps)
+	}
+
+	// Removing the last step leaves no tool run behind.
+	updated, err = s.deleteMessageStep(ctx, profile.ID, assistantID, "step-b")
+	if err != nil {
+		t.Fatalf("delete last step: %v", err)
+	}
+	if len(updated.Steps) != 0 || updated.ToolRun != nil {
+		t.Fatalf("after deleting the last step = %+v / %+v", updated.Steps, updated.ToolRun)
+	}
+	if len(updated.Citations) != 0 {
+		t.Fatalf("citations after deleting the last step = %+v", updated.Citations)
+	}
+}
+
+func TestMessageStepAndAnswerHandlers(t *testing.T) {
+	ctx := context.Background()
+	s, ts := newAuthTestServer(t)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+	owner := setupOwnerProfile(t, client, ts.URL)
+
+	conv, err := s.store.createConversation(ctx, owner.ID, providerOpenRouter,
+		"test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+	if _, _, err := s.store.appendUserMessage(ctx, owner.ID, conv.ID,
+		providerOpenRouter, "test/model", "question", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+	steps := []ChatStep{
+		{ID: "step-a", Tool: "web_search", Query: "first", Sources: []Citation{{URL: "https://a.example", Title: "A"}}},
+		{ID: "step-b", Tool: "web_fetch", Sources: []Citation{{URL: "https://b.example", Title: "B"}}},
+	}
+	assistantID := newID()
+	if err := s.store.saveAssistant(ctx, owner.ID, conv.ID, assistantID,
+		"answer", "", steps, citationsFromSteps(steps),
+		&ToolRun{Enabled: true, MaxCalls: 6, Calls: 2, Searches: 1}, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	code, data := doJSON(t, client, http.MethodDelete,
+		ts.URL+"/api/messages/"+assistantID+"/steps/step-a", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete step = %d, body = %s", code, data)
+	}
+	var afterStep Message
+	if err := json.Unmarshal(data, &afterStep); err != nil {
+		t.Fatalf("decode step response: %v", err)
+	}
+	if len(afterStep.Steps) != 1 || afterStep.Steps[0].ID != "step-b" || afterStep.Content != "answer" {
+		t.Fatalf("after step delete = %+v", afterStep)
+	}
+
+	code, data = doJSON(t, client, http.MethodDelete,
+		ts.URL+"/api/messages/"+assistantID+"/answer", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("clear answer = %d, body = %s", code, data)
+	}
+	var afterClear Message
+	if err := json.Unmarshal(data, &afterClear); err != nil {
+		t.Fatalf("decode answer response: %v", err)
+	}
+	if afterClear.Content != "" || len(afterClear.Steps) != 1 {
+		t.Fatalf("after answer clear = %+v", afterClear)
+	}
+
+	code, _ = doJSON(t, client, http.MethodDelete,
+		ts.URL+"/api/messages/"+assistantID+"/steps/missing", nil, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("missing step = %d, want 404", code)
+	}
+	code, _ = doJSON(t, client, http.MethodDelete,
+		ts.URL+"/api/messages/missing/answer", nil, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("missing message = %d, want 404", code)
+	}
+}

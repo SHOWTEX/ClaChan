@@ -1280,6 +1280,181 @@ func (s *Store) editMessage(ctx context.Context, profileID, msgID, content strin
 	return title, tx.Commit()
 }
 
+// storedMessageQuery loads one assistant message together with the conversation
+// it belongs to, scoped to the signed-in profile.
+const storedMessageQuery = `
+	SELECT m.id, m.role, m.content, m.conversation_id, m.attachments, m.citations,
+	       m.tool_run, m.reasoning, m.steps, m.created_at
+	FROM messages m
+	JOIN conversations c ON c.id = m.conversation_id
+	WHERE m.id = ? AND c.profile_id = ? AND m.role = 'assistant'`
+
+func scanStoredMessage(row *sql.Row) (*Message, string, error) {
+	var m Message
+	var convID string
+	var attachmentsJSON, citationsJSON, toolRunJSON, stepsJSON string
+	if err := row.Scan(&m.ID, &m.Role, &m.Content, &convID, &attachmentsJSON,
+		&citationsJSON, &toolRunJSON, &m.Reasoning, &stepsJSON, &m.CreatedAt); err != nil {
+		return nil, "", err
+	}
+	if err := json.Unmarshal([]byte(attachmentsJSON), &m.Attachments); err != nil {
+		return nil, "", fmt.Errorf("decode message attachments: %w", err)
+	}
+	if err := json.Unmarshal([]byte(citationsJSON), &m.Citations); err != nil {
+		return nil, "", fmt.Errorf("decode message citations: %w", err)
+	}
+	if toolRunJSON != "" {
+		if err := json.Unmarshal([]byte(toolRunJSON), &m.ToolRun); err != nil {
+			return nil, "", fmt.Errorf("decode message tool run: %w", err)
+		}
+	}
+	if stepsJSON != "" {
+		if err := json.Unmarshal([]byte(stepsJSON), &m.Steps); err != nil {
+			return nil, "", fmt.Errorf("decode message steps: %w", err)
+		}
+	}
+	return &m, convID, nil
+}
+
+// citationsFromSteps collects the sources of the surviving steps, keeping the
+// order they first appeared in and dropping duplicates.
+func citationsFromSteps(steps []ChatStep) []Citation {
+	out := []Citation{}
+	seen := make(map[string]bool)
+	for _, step := range steps {
+		for _, source := range step.Sources {
+			if source.URL == "" || seen[source.URL] {
+				continue
+			}
+			seen[source.URL] = true
+			out = append(out, source)
+		}
+	}
+	return out
+}
+
+func countSteps(steps []ChatStep, tool string) int {
+	count := 0
+	for _, step := range steps {
+		if step.Tool == tool {
+			count++
+		}
+	}
+	return count
+}
+
+// deleteMessageStep removes one tool step from an assistant message and keeps
+// the message's citations and tool-run summary consistent with what is left.
+func (s *Store) deleteMessageStep(ctx context.Context, profileID, msgID, stepID string) (*Message, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	message, convID, err := scanStoredMessage(tx.QueryRowContext(ctx, storedMessageQuery, msgID, profileID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	index := -1
+	for i := range message.Steps {
+		if message.Steps[i].ID == stepID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil, ErrNotFound
+	}
+	message.Steps = append(message.Steps[:index], message.Steps[index+1:]...)
+	message.Citations = citationsFromSteps(message.Steps)
+
+	if message.ToolRun != nil {
+		message.ToolRun.Calls = len(message.Steps)
+		message.ToolRun.Searches = countSteps(message.Steps, "web_search")
+		message.ToolRun.Activities = activitiesFromSteps(message.Steps)
+		if len(message.Steps) == 0 {
+			message.ToolRun = nil
+		}
+	} else if len(message.Steps) > 0 {
+		message.ToolRun = &ToolRun{
+			Enabled:    true,
+			Calls:      len(message.Steps),
+			Searches:   countSteps(message.Steps, "web_search"),
+			Activities: activitiesFromSteps(message.Steps),
+		}
+	}
+
+	stepsJSON, err := json.Marshal(message.Steps)
+	if err != nil {
+		return nil, fmt.Errorf("encode message steps: %w", err)
+	}
+	citationsJSON, err := json.Marshal(message.Citations)
+	if err != nil {
+		return nil, fmt.Errorf("encode message citations: %w", err)
+	}
+	toolRunJSON := ""
+	if message.ToolRun != nil {
+		encoded, err := json.Marshal(message.ToolRun)
+		if err != nil {
+			return nil, fmt.Errorf("encode message tool run: %w", err)
+		}
+		toolRunJSON = string(encoded)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE messages SET steps = ?, citations = ?, tool_run = ? WHERE id = ? AND conversation_id = ?",
+		string(stepsJSON), string(citationsJSON), toolRunJSON, message.ID, convID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE conversations SET updated_at = ? WHERE id = ?", nowMillis(), convID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return message, nil
+}
+
+// clearMessageAnswer removes the written answer while keeping its research
+// steps, so the reply can be rewritten from the results that already exist.
+func (s *Store) clearMessageAnswer(ctx context.Context, profileID, msgID string) (*Message, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	message, convID, err := scanStoredMessage(tx.QueryRowContext(ctx, storedMessageQuery, msgID, profileID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE messages SET content = '', reasoning = '' WHERE id = ? AND conversation_id = ?",
+		message.ID, convID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE conversations SET updated_at = ? WHERE id = ?", nowMillis(), convID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	message.Content = ""
+	message.Reasoning = ""
+	return message, nil
+}
+
 // branchConversation copies a conversation up to and including messageID into a
 // new conversation. The copy keeps the source's provider, model, prompt,
 // routing, tool, and reasoning settings, and gets fresh message IDs.

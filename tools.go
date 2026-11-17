@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -221,4 +222,57 @@ func activitiesFromSteps(steps []ChatStep) []ToolActivity {
 		})
 	}
 	return activities
+}
+
+// researchBrief renders earlier tool steps as plain text for a rewrite that
+// runs with tools disabled. The model answers from this evidence instead of
+// searching again. Results are bounded so a long research trail cannot crowd
+// out the conversation.
+func researchBrief(steps []ChatStep) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	const budget = 48000
+
+	var b strings.Builder
+	b.WriteString("This answer is being rewritten from research that already ran. ")
+	b.WriteString("Use the previous tool results below as the evidence and answer the user's question directly. ")
+	b.WriteString("No tools are available for this turn, so do not say you ran new searches or fetches.\n")
+
+	remaining := budget
+	for i, step := range steps {
+		name := strings.TrimSpace(step.Tool)
+		if name == "" {
+			name = "tool"
+		}
+		header := fmt.Sprintf("\n[%d] %s", i+1, name)
+		if query := strings.TrimSpace(step.Query); query != "" {
+			header += " - query: " + query
+		}
+		b.WriteString(header + "\n")
+
+		for _, source := range step.Sources {
+			if source.URL == "" {
+				continue
+			}
+			line := "- " + strings.TrimSpace(source.Title)
+			line += " (" + source.URL + ")"
+			b.WriteString(line + "\n")
+		}
+
+		result := strings.TrimSpace(step.Result)
+		if result == "" {
+			continue
+		}
+		if remaining <= 0 {
+			b.WriteString("(Result omitted for length.)\n")
+			continue
+		}
+		if len(result) > remaining {
+			result = truncate(result, remaining)
+		}
+		b.WriteString("Result:\n" + result + "\n")
+		remaining -= len(result)
+	}
+	return b.String()
 }

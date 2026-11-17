@@ -745,6 +745,49 @@ func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleDeleteMessageStep removes one web search or fetch step from an
+// assistant reply, leaving the written answer in place.
+func (s *Server) handleDeleteMessageStep(w http.ResponseWriter, r *http.Request) {
+	profile := currentProfile(r)
+	if profile == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue.", 0)
+		return
+	}
+	message, err := s.store.deleteMessageStep(r.Context(), profile.ID,
+		r.PathValue("id"), r.PathValue("stepID"))
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Message or step not found.", 0)
+		return
+	}
+	if err != nil {
+		s.log.Error("delete message step", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not delete the step.", 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, message)
+}
+
+// handleClearMessageAnswer removes a reply's answer text while keeping its
+// research steps, so it can be rewritten from those results.
+func (s *Server) handleClearMessageAnswer(w http.ResponseWriter, r *http.Request) {
+	profile := currentProfile(r)
+	if profile == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue.", 0)
+		return
+	}
+	message, err := s.store.clearMessageAnswer(r.Context(), profile.ID, r.PathValue("id"))
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Message not found.", 0)
+		return
+	}
+	if err != nil {
+		s.log.Error("clear message answer", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not delete the answer.", 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, message)
+}
+
 // handleUpdateMessage edits a message in place. It never starts a generation:
 // the edited text simply becomes the history the next turn is built from.
 func (s *Server) handleUpdateMessage(w http.ResponseWriter, r *http.Request) {

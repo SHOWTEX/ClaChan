@@ -2215,7 +2215,18 @@
     return (ms / 1000).toFixed(1).replace(/\.0$/, "") + " s";
   }
 
-  function stepCard(step, position, key) {
+  function canEditReply(message) {
+    return Boolean(message && message.id) &&
+      !String(message.id).startsWith("tmp-") &&
+      !state.streaming;
+  }
+
+  function latestReply(message) {
+    const messages = (state.current && state.current.messages) || [];
+    return messages[messages.length - 1] === message;
+  }
+
+  function stepCard(message, step, position, key) {
     const card = el("section", "step-card");
     if (step.status && step.status !== "completed") card.classList.add("step-unfinished");
 
@@ -2226,8 +2237,16 @@
     if (step.status && step.status !== "completed") {
       head.append(el("span", "step-status", step.status));
     }
+
+    const tools = el("span", "step-tools");
     const duration = formatDuration(step.durationMs);
-    if (duration) head.append(el("span", "step-duration", duration));
+    if (duration) tools.append(el("span", "step-duration", duration));
+    if (canEditReply(message) && step.id) {
+      const remove = iconButton("i-trash", "Delete this step", "msg-action");
+      remove.addEventListener("click", () => deleteStep(message, step));
+      tools.append(remove);
+    }
+    if (tools.childNodes.length) head.append(tools);
     card.append(head);
 
     const reasoning = reasoningBlock(step.reasoning, "", key ? key + ":reasoning" : "");
@@ -2270,13 +2289,31 @@
     if (message.streaming && message === state.streamingMsg) {
       head.append(el("span", "step-status", "writing"));
     }
+
+    const tools = el("span", "step-tools");
+    if (canEditReply(message) && latestReply(message) && (message.steps || []).length) {
+      const rewrite = iconButton("i-refresh",
+        "Rewrite this answer from the research above, without new searches", "msg-action");
+      rewrite.addEventListener("click", () => regenerateAnswer(message));
+      tools.append(rewrite);
+    }
+    if (canEditReply(message) && (message.content || message.reasoning)) {
+      const remove = iconButton("i-trash", "Delete this answer, keeping the research above", "msg-action");
+      remove.addEventListener("click", () => deleteAnswer(message));
+      tools.append(remove);
+    }
+    if (tools.childNodes.length) head.append(tools);
     card.append(head);
 
     const reasoning = reasoningBlock(message.reasoning, "", key ? key + ":answer" : "");
     if (reasoning) card.append(reasoning);
 
     const body = el("div", "md");
-    body.replaceChildren(renderMarkdown(message.content));
+    if (message.content) {
+      body.replaceChildren(renderMarkdown(message.content));
+    } else if (!message.streaming) {
+      body.append(el("p", "msg-note", "No answer yet."));
+    }
     if (message.streaming && message === state.streamingMsg) body.append(el("span", "caret"));
     card.append(body);
 
@@ -2325,11 +2362,11 @@
       if (steps.length) {
         const list = el("div", "step-list");
         steps.forEach((step, index) => list.append(
-          stepCard(step, index + 1, reasoningKey + ":step" + (index + 1)),
+          stepCard(message, step, index + 1, reasoningKey + ":step" + (index + 1)),
         ));
-        if (message.content || message.reasoning || (message.streaming && message === state.streamingMsg)) {
-          list.append(answerCard(message, steps.length + 1, reasoningKey + ":answer"));
-        }
+        // Keep the answer card even when the text was deleted, so the reply can
+        // still be rewritten from the research above it.
+        list.append(answerCard(message, steps.length + 1, reasoningKey + ":answer"));
         article.append(list);
         if (!message.content && !message.reasoning) {
           const extras = assistantExtras(message);
@@ -2602,6 +2639,53 @@
     scheduleConversationRefresh();
   }
 
+  // applyMessagePatch folds a server-returned message back into the transcript
+  // after a step or answer change.
+  function applyMessagePatch(message, updated) {
+    if (!message || !updated) return;
+    message.content = typeof updated.content === "string" ? updated.content : "";
+    message.reasoning = typeof updated.reasoning === "string" ? updated.reasoning : "";
+    message.steps = Array.isArray(updated.steps) ? updated.steps : [];
+    message.citations = Array.isArray(updated.citations) ? updated.citations : [];
+    message.toolRun = updated.toolRun || null;
+    renderMessages();
+  }
+
+  async function deleteStep(message, step) {
+    if (state.streaming) {
+      toast("Stop the current reply first.");
+      return;
+    }
+    if (!canEditReply(message) || !step || !step.id) return;
+    try {
+      const updated = await api(
+        "/api/messages/" + encodeURIComponent(message.id) + "/steps/" + encodeURIComponent(step.id),
+        { method: "DELETE" },
+      );
+      applyMessagePatch(message, updated);
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  async function deleteAnswer(message) {
+    if (state.streaming) {
+      toast("Stop the current reply first.");
+      return;
+    }
+    if (!canEditReply(message)) return;
+    try {
+      const updated = await api(
+        "/api/messages/" + encodeURIComponent(message.id) + "/answer",
+        { method: "DELETE" },
+      );
+      applyMessagePatch(message, updated);
+      toast("Answer deleted. The research was kept.");
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
   /* --------------------------------------------------------------- streaming */
 
   function assistantDraft(id) {
@@ -2713,6 +2797,46 @@
     renderMessages({ stick: true });
 
     await streamInto(assistant, { action: "regenerate", messageId: last.id }, {
+      onPreMetaError(err) {
+        if (state.current) state.current.messages = snapshot;
+        toast(err.message);
+      },
+    });
+  }
+
+  // Rewrite the answer from the research already attached to the reply. The
+  // server keeps those steps and offers the model no tools, so nothing new is
+  // searched or fetched.
+  async function regenerateAnswer(message) {
+    if (state.streaming || !state.current || !state.current.id) return;
+
+    const messages = state.current.messages;
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant" || last.streaming) return;
+    if (message !== last) {
+      toast("Only the latest reply can be rewritten.");
+      return;
+    }
+    if (!(last.steps || []).length) {
+      toast("This reply has no research to reuse.");
+      return;
+    }
+
+    clearRetry();
+    const snapshot = messages.slice();
+    const assistant = assistantDraft(last.id);
+    assistant.steps = last.steps;
+    assistant.citations = last.citations || [];
+    assistant.toolRun = last.toolRun || assistant.toolRun;
+    messages[messages.length - 1] = assistant;
+    state.pinned = true;
+    renderMessages({ stick: true });
+
+    await streamInto(assistant, {
+      action: "regenerate",
+      messageId: last.id,
+      reuseTools: true,
+    }, {
       onPreMetaError(err) {
         if (state.current) state.current.messages = snapshot;
         toast(err.message);

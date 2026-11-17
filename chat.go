@@ -35,6 +35,7 @@ type chatRequest struct {
 	Timezone        string       `json:"timezone,omitempty"`
 	Action          string       `json:"action,omitempty"` // "", "regenerate", "edit"
 	MessageID       string       `json:"messageId,omitempty"`
+	ReuseTools      bool         `json:"reuseTools,omitempty"`
 }
 
 type metaEvent struct {
@@ -272,6 +273,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var userContent string
 	var userAttachments []Attachment
 	var replaceID string
+	var priorSteps []ChatStep
+	var priorCitations []Citation
+	var priorToolRun *ToolRun
+	var priorContent, priorReasoning string
+
+	// A rewrite answers from research that already ran: no new server tools are
+	// offered, and the saved message keeps its original steps.
+	researchOnly := req.ReuseTools && req.Action == "regenerate"
+	if req.ReuseTools && req.Action != "regenerate" {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"reuseTools only applies to a regenerated reply.", 0)
+		return
+	}
 
 	switch req.Action {
 	case "":
@@ -291,6 +305,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				"That reply is no longer the latest message. Reload the conversation and try again.", 0)
 			return
 		}
+		if researchOnly && len(last.Steps) == 0 {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"This reply has no tool results to reuse.", 0)
+			return
+		}
+		priorSteps = last.Steps
+		priorCitations = last.Citations
+		priorToolRun = last.ToolRun
+		priorContent = last.Content
+		priorReasoning = last.Reasoning
 		replaceID = last.ID
 		history = history[:len(history)-1]
 	case "edit":
@@ -317,6 +341,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	systemPrompt := buildSystemPrompt(conv.SystemPrompt, profile.PersonaName, profile.UserName, profile.UserPersona)
+	if researchOnly {
+		if brief := researchBrief(priorSteps); brief != "" {
+			systemPrompt = systemPrompt + "\n\n" + brief
+		}
+	}
 
 	var (
 		msgs        []responseInputMessage
@@ -329,6 +358,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		msgs = make([]responseInputMessage, 0, len(history)+1)
 		for _, m := range history {
+			// A reply whose answer was deleted is kept for its research steps,
+			// but it contributes no text to the next turn.
+			if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" {
+				continue
+			}
 			if m.Role == "user" || m.Role == "assistant" {
 				msgs = append(msgs, responseInputMessage{
 					Type:    "message",
@@ -345,7 +379,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		serverTools = buildServerTools(toolsEnabled, timezone, toolCalls)
+		if researchOnly {
+			serverTools = nil
+		} else {
+			serverTools = buildServerTools(toolsEnabled, timezone, toolCalls)
+		}
 		if info := s.models.lookup(provider.ID, model); info != nil && info.SupportsReasoning {
 			reasoning = &reasoningRequest{Summary: "auto"}
 			if reasoningEffort != "" {
@@ -759,6 +797,22 @@ read:
 		steps = streamedSteps
 	}
 	toolRun := buildToolRun(toolsEnabled, toolCalls, capturedUsage, activitiesFromSteps(steps))
+	if researchOnly {
+		// The rewrite ran without tools; keep the transcript the reply already
+		// had so the UI still shows the research behind the new answer.
+		steps = priorSteps
+		citations = priorCitations
+		toolRun = priorToolRun
+		if toolRun == nil && len(steps) > 0 {
+			toolRun = buildToolRun(toolsEnabled, toolCalls, nil, activitiesFromSteps(steps))
+		}
+		if strings.TrimSpace(text) == "" && strings.TrimSpace(finalReasoning) == "" {
+			// Nothing usable came back. Restore the previous answer instead of
+			// wiping it, and leave the stored research untouched.
+			text = priorContent
+			finalReasoning = priorReasoning
+		}
+	}
 	saved := false
 	// A reasoning-only reply is still a real reply; keep it instead of discarding
 	// it and telling the user that OpenRouter returned nothing.

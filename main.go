@@ -177,6 +177,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/conversations/{id}/branch", s.requireSession(s.handleBranchConversation))
 	mux.HandleFunc("PATCH /api/messages/{id}", s.requireSession(s.handleUpdateMessage))
 	mux.HandleFunc("DELETE /api/messages/{id}", s.requireSession(s.handleDeleteMessage))
+	mux.HandleFunc("DELETE /api/messages/{id}/steps/{stepID}", s.requireSession(s.handleDeleteMessageStep))
+	mux.HandleFunc("DELETE /api/messages/{id}/answer", s.requireSession(s.handleClearMessageAnswer))
 	mux.HandleFunc("POST /api/chat", s.requireSession(s.handleChat))
 
 	mux.Handle("GET /", s.staticHandler())

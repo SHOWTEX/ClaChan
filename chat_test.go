@@ -923,3 +923,164 @@ func TestParseRetryAfter(t *testing.T) {
 		t.Errorf("http date = %d", got)
 	}
 }
+
+func TestChatRegenerateReusesResearchWithoutTools(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		emitTextResponse(w, "Rewritten answer", []string{"Rewritten ", "answer"})
+	}))
+	defer upstream.Close()
+
+	env := newTestEnv(t, upstream)
+	ctx := context.Background()
+	conv, err := env.s.store.createConversation(ctx, env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+	if _, _, err := env.s.store.appendUserMessage(ctx, env.profile.ID, conv.ID,
+		providerOpenRouter, "test/model", "who is the protagonist?", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+
+	steps := []ChatStep{{
+		ID:      "step-1",
+		Tool:    "web_search",
+		Query:   "dungeon light novel protagonist",
+		Status:  "completed",
+		Result:  `{"query":"dungeon light novel protagonist","results":[{"title":"Example result","url":"https://example.com/a"}]}`,
+		Sources: []Citation{{URL: "https://example.com/a", Title: "Example result"}},
+	}}
+	citations := []Citation{{URL: "https://example.com/a", Title: "Example result"}}
+	run := &ToolRun{Enabled: true, MaxCalls: 3, Calls: 1, Searches: 1, Activities: activitiesFromSteps(steps)}
+	assistantID := newID()
+	if err := env.s.store.saveAssistant(ctx, env.profile.ID, conv.ID, assistantID,
+		"Old answer", "Old reasoning", steps, citations, run, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"conversationId":%q,"action":"regenerate","messageId":%q,"reuseTools":true,"toolsEnabled":true,"maxToolCalls":9}`,
+		conv.ID, assistantID)
+	rec := postChat(t, env.s, env.profile, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if strings.Contains(gotBody, `"tools":`) {
+		t.Fatalf("rewrite must not offer server tools:\n%s", gotBody)
+	}
+	for _, want := range []string{
+		"This answer is being rewritten from research that already ran",
+		"Example result",
+		"https://example.com/a",
+	} {
+		if !strings.Contains(gotBody, want) {
+			t.Fatalf("upstream body missing %q:\n%s", want, gotBody)
+		}
+	}
+
+	saved, err := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if err != nil {
+		t.Fatalf("getConversation: %v", err)
+	}
+	last := saved.Messages[len(saved.Messages)-1]
+	if last.Content != "Rewritten answer" {
+		t.Fatalf("content = %q, want the rewritten answer", last.Content)
+	}
+	if len(last.Steps) != 1 || last.Steps[0].ID != "step-1" {
+		t.Fatalf("steps after rewrite = %+v, want the original step", last.Steps)
+	}
+	if last.ToolRun == nil || last.ToolRun.Calls != 1 || last.ToolRun.Searches != 1 {
+		t.Fatalf("tool run after rewrite = %+v", last.ToolRun)
+	}
+	if len(last.Citations) != 1 || last.Citations[0].URL != "https://example.com/a" {
+		t.Fatalf("citations after rewrite = %+v", last.Citations)
+	}
+}
+
+func TestChatReuseToolsRejectsOtherActions(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream must not be called")
+	}))
+	defer upstream.Close()
+
+	env := newTestEnv(t, upstream)
+	conv, _ := env.s.store.createConversation(context.Background(), env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile,
+		fmt.Sprintf(`{"conversationId":%q,"content":"hi","reuseTools":true}`, conv.ID))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatReuseToolsRequiresResearch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream must not be called")
+	}))
+	defer upstream.Close()
+
+	env := newTestEnv(t, upstream)
+	ctx := context.Background()
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if _, _, err := env.s.store.appendUserMessage(ctx, env.profile.ID, conv.ID,
+		providerOpenRouter, "test/model", "question", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+	assistantID := newID()
+	if err := env.s.store.saveAssistant(ctx, env.profile.ID, conv.ID, assistantID,
+		"plain answer", "", nil, nil, nil, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	rec := postChat(t, env.s, env.profile,
+		fmt.Sprintf(`{"conversationId":%q,"action":"regenerate","messageId":%q,"reuseTools":true}`, conv.ID, assistantID))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatSkipsClearedAnswerInHistory(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		emitTextResponse(w, "Second answer", []string{"Second answer"})
+	}))
+	defer upstream.Close()
+
+	env := newTestEnv(t, upstream)
+	ctx := context.Background()
+	conv, err := env.s.store.createConversation(ctx, env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+	if _, _, err := env.s.store.appendUserMessage(ctx, env.profile.ID, conv.ID,
+		providerOpenRouter, "test/model", "first question", nil); err != nil {
+		t.Fatalf("appendUserMessage: %v", err)
+	}
+	steps := []ChatStep{{ID: "step-1", Tool: "web_search", Query: "q", Status: "completed"}}
+	if err := env.s.store.saveAssistant(ctx, env.profile.ID, conv.ID, newID(),
+		"", "", steps, nil, &ToolRun{Enabled: true, MaxCalls: 3, Calls: 1}, false); err != nil {
+		t.Fatalf("saveAssistant: %v", err)
+	}
+
+	rec := postChat(t, env.s, env.profile,
+		fmt.Sprintf(`{"conversationId":%q,"content":"second question"}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(gotBody, `"role":"assistant"`) {
+		t.Fatalf("history must not include the cleared answer:\n%s", gotBody)
+	}
+	for _, want := range []string{"first question", "second question"} {
+		if !strings.Contains(gotBody, want) {
+			t.Fatalf("upstream body missing %q:\n%s", want, gotBody)
+		}
+	}
+}
