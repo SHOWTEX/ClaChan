@@ -3410,7 +3410,7 @@
     dom.toolCap.disabled = state.streaming;
     dom.composerHint.textContent = local
       ? "Enter to send · Shift+Enter for a new line · Text files only on local backends"
-      : "Enter to send · Shift+Enter for a new line · Attach images, PDFs, or text files";
+      : "Enter to send · Shift+Enter for a new line · Paste or attach images, PDFs, or text files";
     dom.attachFile.title = local ? "Attach a text file" : "Attach image, PDF, or text file";
     dom.attachFile.setAttribute("aria-label", dom.attachFile.title);
     syncAttachmentMode();
@@ -3722,6 +3722,24 @@
     if (attachment.kind === "image" && !model.supportsVision) {
       toast("This model is not marked as vision-capable; the image may be rejected.");
     }
+  }
+
+  // clipboardFiles pulls pasted files (for example an image copied from a
+  // browser) out of a paste event. Most browsers expose them as items; files
+  // is the fallback for older engines.
+  function clipboardFiles(event) {
+    const data = event.clipboardData;
+    if (!data) return [];
+    const files = [];
+    for (const item of data.items || []) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    if (!files.length && data.files) {
+      for (const file of data.files) files.push(file);
+    }
+    return files;
   }
 
   async function addFiles(fileList) {
@@ -5183,6 +5201,12 @@
 
     dom.attachFile.addEventListener("click", () => dom.fileInput.click());
     dom.fileInput.addEventListener("change", () => addFiles(dom.fileInput.files));
+    dom.input.addEventListener("paste", (event) => {
+      const files = clipboardFiles(event);
+      if (!files.length) return;
+      event.preventDefault();
+      addFiles(files);
+    });
 
     dom.openPrompts.addEventListener("click", openPrompts);
     dom.promptSearch.addEventListener("input", renderPromptList);
