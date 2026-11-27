@@ -17,6 +17,7 @@ type Config struct {
 	AppTitle            string
 	DefaultModel        string
 	DefaultSystemPrompt string
+	TavilyBaseURL       string
 }
 
 const (
@@ -44,6 +45,7 @@ func loadConfig() *Config {
 		AppTitle:            env("OPENROUTER_TITLE", defaultTitle),
 		DefaultModel:        env("DEFAULT_MODEL", defaultModel),
 		DefaultSystemPrompt: env("DEFAULT_SYSTEM_PROMPT", ""),
+		TavilyBaseURL:       strings.TrimRight(env("TAVILY_BASE_URL", "https://api.tavily.com"), "/"),
 	}
 }
 

@@ -417,6 +417,9 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		PersonaPrompt    *string `json:"personaPrompt"`
 		UserName         *string `json:"userName"`
 		UserPersona      *string `json:"userPersona"`
+		WebProvider      *string `json:"webProvider"`
+		TavilyKey        *string `json:"tavilyKey"`
+		ClearTavilyKey   bool    `json:"clearTavilyKey"`
 	}
 	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
@@ -424,7 +427,8 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DefaultModel == nil && req.DefaultProvider == nil && req.IgnoredProviders == nil &&
 		req.PersonaName == nil && req.PersonaPrompt == nil &&
-		req.UserName == nil && req.UserPersona == nil {
+		req.UserName == nil && req.UserPersona == nil &&
+		req.WebProvider == nil && req.TavilyKey == nil && !req.ClearTavilyKey {
 		writeError(w, http.StatusBadRequest, "bad_request", "No profile settings to update.", 0)
 		return
 	}
@@ -495,6 +499,64 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("update ignored providers", "err", err)
 			writeError(w, http.StatusInternalServerError, "storage", "Could not save ignored providers.", 0)
 			return
+		}
+	}
+
+	if req.WebProvider != nil {
+		webProvider := strings.TrimSpace(*req.WebProvider)
+		if !validWebProvider(webProvider) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Unknown web search provider.", 0)
+			return
+		}
+		if webProvider == "" {
+			webProvider = webProviderOpenRouter
+		}
+		if err := s.store.updateProfileWebProvider(r.Context(), profile.ID, webProvider); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "Profile not found.", 0)
+				return
+			}
+			s.log.Error("update web provider", "err", err)
+			writeError(w, http.StatusInternalServerError, "storage", "Could not save the web provider.", 0)
+			return
+		}
+	}
+
+	if req.ClearTavilyKey || req.TavilyKey != nil {
+		sealed := ""
+		if req.TavilyKey != nil {
+			value := strings.TrimSpace(*req.TavilyKey)
+			if value != "" {
+				if !validBackendAPIKey(value) {
+					writeError(w, http.StatusBadRequest, "bad_request", "That Tavily API key is invalid.", 0)
+					return
+				}
+				if s.secrets == nil {
+					writeError(w, http.StatusInternalServerError, "storage", "Secret storage is not available.", 0)
+					return
+				}
+				encrypted, err := s.secrets.seal(value)
+				if err != nil {
+					s.log.Error("encrypt Tavily key", "err", err)
+					writeError(w, http.StatusInternalServerError, "storage", "Could not save the API key.", 0)
+					return
+				}
+				sealed = encrypted
+			}
+		}
+		if req.ClearTavilyKey {
+			sealed = ""
+		}
+		if sealed != "" || req.ClearTavilyKey {
+			if err := s.store.updateProfileTavilyKey(r.Context(), profile.ID, sealed); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					writeError(w, http.StatusNotFound, "not_found", "Profile not found.", 0)
+					return
+				}
+				s.log.Error("save Tavily key", "err", err)
+				writeError(w, http.StatusInternalServerError, "storage", "Could not save the API key.", 0)
+				return
+			}
 		}
 	}
 

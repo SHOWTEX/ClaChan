@@ -21,7 +21,7 @@ import (
 var staticFiles embed.FS
 
 // version is set at build time with -X main.version for tagged releases.
-var version = "1.1.4"
+var version = "1.1.5"
 
 const (
 	// maxStreams is a hard cap. A third concurrent generation is rejected with
@@ -38,6 +38,7 @@ type Server struct {
 	providers map[string]*Provider
 	models    *modelCache
 	store     *Store
+	secrets   *secretBox
 	limiter   *rate.Limiter
 	sem       chan struct{}
 	streams   atomic.Int32
@@ -72,6 +73,18 @@ func run() int {
 	}
 	defer store.Close()
 
+	secrets, err := loadSecretBox(cfg.DBPath)
+	if err != nil {
+		logger.Error("load secret key", "err", err)
+		return 1
+	}
+	if n, err := migratePlaintextSecrets(context.Background(), store, secrets); err != nil {
+		logger.Error("encrypt saved backend keys", "err", err)
+		return 1
+	} else if n > 0 {
+		logger.Info("encrypted saved backend keys", "count", n)
+	}
+
 	// Housekeeping: expired sessions are useless and cheap to remove.
 	if err := store.deleteExpiredSessions(context.Background(), nowMillis()); err != nil {
 		logger.Warn("prune expired sessions", "err", err)
@@ -88,6 +101,7 @@ func run() int {
 		client:    newHTTPClient(),
 		providers: newProviders(cfg),
 		store:     store,
+		secrets:   secrets,
 		limiter:   rate.NewLimiter(rate.Limit(chatRatePerSecond), chatRateBurst),
 		sem:       make(chan struct{}, maxStreams),
 		hashSem:   make(chan struct{}, 2),
@@ -100,7 +114,7 @@ func run() int {
 
 	s.models.start(rootCtx, s.providers)
 	if cfg.APIKey == "" {
-		logger.Warn("OPENROUTER_API_KEY is not set; chat requests will be rejected until it is")
+		logger.Info("no server-wide OpenRouter key; profiles can save their own in Settings")
 	}
 
 	srv := &http.Server{

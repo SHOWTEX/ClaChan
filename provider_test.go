@@ -122,15 +122,21 @@ func TestNormalizeReasoning(t *testing.T) {
 	}
 
 	cache := newModelCache(http.DefaultClient, testLogger())
-	if got := cache.lookup(providerOpenRouter, "missing"); got != nil {
+	provider := &Provider{ID: providerOpenRouter, APIKey: "test-key-a"}
+	if got := cache.lookup(provider, "missing"); got != nil {
 		t.Fatalf("lookup missing = %+v", got)
 	}
 	cache.models = map[string][]Model{
-		providerOpenRouter: {{ID: "test/model", Name: "Test"}},
+		provider.cacheKey(): {{ID: "test/model", Name: "Test"}},
 	}
-	got := cache.lookup(providerOpenRouter, "test/model")
+	got := cache.lookup(provider, "test/model")
 	if got == nil || got.Name != "Test" {
 		t.Fatalf("lookup = %+v", got)
+	}
+	// A profile with a different key must not see another profile's catalogue.
+	other := &Provider{ID: providerOpenRouter, APIKey: "test-key-b"}
+	if got := cache.lookup(other, "test/model"); got != nil {
+		t.Fatalf("other key saw cached model: %+v", got)
 	}
 }
 

@@ -315,13 +315,10 @@ if grep -qx 'OPENROUTER_REFERER=http://clachan.local' "$CONFIG_FILE" 2>/dev/null
 	mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 fi
 
+# API keys are normally added in the app under Settings -> Backends & keys.
+# CLACHAN_API_KEY is kept for unattended installs that want a server-wide
+# OpenRouter fallback key.
 KEY="${CLACHAN_API_KEY:-}"
-if [ -z "$KEY" ] && ! grep -Eq '^OPENROUTER_API_KEY=.+' "$CONFIG_FILE" 2>/dev/null; then
-	if [ -r /dev/tty ]; then
-		printf 'OpenRouter API key (leave blank to set later): ' >/dev/tty
-		IFS= read -r KEY < /dev/tty || KEY=""
-	fi
-fi
 if [ -n "$KEY" ]; then
 	KEY="$KEY" awk 'BEGIN { key = ENVIRON["KEY"] } /^OPENROUTER_API_KEY=/ { print "OPENROUTER_API_KEY=" key; next } { print }' "$CONFIG_FILE" >"$CONFIG_FILE.tmp"
 	chown root:"$SERVICE_USER" "$CONFIG_FILE.tmp"
@@ -399,8 +396,8 @@ else
 	printf '  Start:   sudo systemctl enable --now %s\n' "$SERVICE_NAME"
 fi
 if ! grep -Eq '^OPENROUTER_API_KEY=.+' "$CONFIG_FILE" 2>/dev/null; then
-	printf '\nSet OPENROUTER_API_KEY in %s, then restart the service:\n' "$CONFIG_FILE"
-	printf '  sudo systemctl restart %s\n' "$SERVICE_NAME"
+	printf '\nAdd an OpenRouter, Tavily, or local backend key per profile in Settings -> Backends & keys.\n'
+	printf 'For a server-wide fallback instead, set OPENROUTER_API_KEY in %s and restart.\n' "$CONFIG_FILE"
 fi
 printf '\nUpdate:  curl -fsSL %s/install.sh | sudo bash\n' "$LATEST_BASE"
 printf 'Uninstall: curl -fsSL %s/install.sh | sudo bash -s -- --uninstall\n' "$LATEST_BASE"

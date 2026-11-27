@@ -146,9 +146,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	providers, fetchedAt := s.models.snapshot(s.providers)
+	profile := currentProfile(r)
+	if profile == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue.", 0)
+		return
+	}
+
+	provider, err := s.providerFor(r.Context(), profile.ID, providerOpenRouter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage", "Could not resolve OpenRouter.", 0)
+		return
+	}
+	if provider.enabled() {
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		s.models.ensure(ctx, provider)
+		cancel()
+	}
+	entry, fetchedAt := s.models.snapshotFor(provider)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"providers": providers,
+		"providers": []ProviderModels{entry},
 		"fetchedAt": fetchedAt,
 	})
 }
@@ -165,9 +181,9 @@ func (s *Server) handleModelEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "A valid model is required.", 0)
 		return
 	}
-	provider := s.providers[providerOpenRouter]
-	if provider == nil || !provider.enabled() {
-		writeError(w, http.StatusBadGateway, "provider_auth", "No OpenRouter API key is configured.", 0)
+	provider, err := s.providerFor(r.Context(), profile.ID, providerOpenRouter)
+	if err != nil || !provider.enabled() {
+		writeError(w, http.StatusBadGateway, "provider_auth", "No OpenRouter API key is configured for this profile.", 0)
 		return
 	}
 
@@ -224,10 +240,24 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		ToolsEnabled    *bool   `json:"toolsEnabled"`
 		MaxToolCalls    *int    `json:"maxToolCalls"`
 		ReasoningEffort string  `json:"reasoningEffort"`
+		WebProvider     string  `json:"webProvider"`
 	}
 	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
 		return
+	}
+
+	webProvider := strings.TrimSpace(req.WebProvider)
+	if !validWebProvider(webProvider) {
+		writeError(w, http.StatusBadRequest, "bad_request", "Unknown web search provider.", 0)
+		return
+	}
+	explicitWeb := webProvider != ""
+	webProvider = normalizeWebProvider(webProvider)
+	// Local backends have no server tools, so a web provider choice is moot.
+	if strings.TrimSpace(req.Provider) != "" && strings.TrimSpace(req.Provider) != providerOpenRouter {
+		explicitWeb = false
+		webProvider = ""
 	}
 
 	providerID := strings.TrimSpace(req.Provider)
@@ -327,6 +357,14 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		s.log.Error("create conversation", "err", err)
 		writeError(w, http.StatusInternalServerError, "storage", "Could not create the conversation.", 0)
 		return
+	}
+	if explicitWeb {
+		if err := s.store.updateConversation(r.Context(), profile.ID, conv.ID,
+			ConversationUpdate{WebProvider: &webProvider}); err != nil {
+			s.log.Warn("save conversation web provider", "err", err)
+		} else {
+			conv.WebProvider = webProvider
+		}
 	}
 	writeJSON(w, http.StatusCreated, conv)
 }
@@ -569,6 +607,7 @@ func (s *Server) handleUpdateConversation(w http.ResponseWriter, r *http.Request
 		ToolsEnabled    *bool   `json:"toolsEnabled"`
 		MaxToolCalls    *int    `json:"maxToolCalls"`
 		ReasoningEffort *string `json:"reasoningEffort"`
+		WebProvider     *string `json:"webProvider"`
 	}
 	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
@@ -673,6 +712,17 @@ func (s *Server) handleUpdateConversation(w http.ResponseWriter, r *http.Request
 		}
 		req.ReasoningEffort = &effort
 	}
+	if req.WebProvider != nil {
+		webProvider := strings.TrimSpace(*req.WebProvider)
+		if !validWebProvider(webProvider) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Unknown web search provider.", 0)
+			return
+		}
+		if webProvider != "" {
+			webProvider = normalizeWebProvider(webProvider)
+		}
+		req.WebProvider = &webProvider
+	}
 
 	id := r.PathValue("id")
 	upd := ConversationUpdate{
@@ -686,6 +736,7 @@ func (s *Server) handleUpdateConversation(w http.ResponseWriter, r *http.Request
 		ToolsEnabled:    req.ToolsEnabled,
 		MaxToolCalls:    req.MaxToolCalls,
 		ReasoningEffort: req.ReasoningEffort,
+		WebProvider:     req.WebProvider,
 	}
 	err := s.store.updateConversation(r.Context(), profile.ID, id, upd)
 	if errors.Is(err, ErrNotFound) {

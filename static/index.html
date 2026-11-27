@@ -117,9 +117,17 @@
           <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
           <span id="tools-toggle-label">Web tools on</span>
         </button>
-        <label class="tool-cap" id="tool-cap-field" for="tool-cap" title="Maximum searches and fetches per reply (1–30), applied separately to each web tool. Date/time and model search do not count.">Max calls
+        <label class="tool-cap" id="tool-cap-field" for="tool-cap" title="Maximum searches and fetches per reply (1–30). Date/time and model search do not count.">Max calls
           <input id="tool-cap" type="number" min="1" max="30" step="1" value="6" inputmode="numeric">
         </label>
+        <div class="reasoning-menu" id="web-provider-menu">
+          <button class="tool-pill reasoning-trigger" id="web-provider-trigger" type="button" aria-haspopup="menu" aria-controls="web-provider-dropup" aria-expanded="false" title="Web search and fetch provider for this chat">
+            <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+            <span id="web-provider-trigger-label">OpenRouter</span>
+            <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"></use></svg>
+          </button>
+          <div class="reasoning-dropup" id="web-provider-dropup" role="menu" aria-label="Web search provider" hidden></div>
+        </div>
         <div class="reasoning-menu" id="reasoning-menu">
           <button class="tool-pill reasoning-trigger" id="reasoning-trigger" type="button" aria-haspopup="menu" aria-controls="reasoning-dropup" aria-expanded="false" title="Reasoning effort for this chat">
             <svg class="icon" aria-hidden="true"><use href="#i-brain"></use></svg>
@@ -415,7 +423,7 @@
       <nav class="settings-nav" role="tablist" aria-label="Settings sections">
         <button class="settings-tab active" type="button" role="tab" data-settings-tab="chat" aria-selected="true">Chat</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="persona" aria-selected="false">Persona</button>
-        <button class="settings-tab" type="button" role="tab" data-settings-tab="backends" aria-selected="false">Backends</button>
+        <button class="settings-tab" type="button" role="tab" data-settings-tab="backends" aria-selected="false">Backends &amp; keys</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="providers" aria-selected="false">Providers</button>
         <button class="settings-tab" type="button" role="tab" data-settings-tab="appearance" aria-selected="false">Appearance</button>
       </nav>
@@ -482,6 +490,24 @@
         </section>
 
         <section class="settings-panel" data-settings-panel="backends" role="tabpanel" hidden>
+          <section class="field">
+            <h3 class="settings-section-title">Web search</h3>
+            <label class="field">
+              <span class="field-label">Default provider for new chats</span>
+              <select id="web-provider">
+                <option value="openrouter">OpenRouter</option>
+                <option value="tavily">Tavily</option>
+              </select>
+              <span class="field-help">Tavily runs inside Clachan and falls back to OpenRouter for the rest of a reply if a search or fetch fails. OpenRouter runs web search and fetch on its side. Each chat can override this beside its Web on/off switch.</span>
+            </label>
+          </section>
+
+          <section class="field">
+            <h3 class="settings-section-title">API keys</h3>
+            <span class="field-help">Keys are encrypted on the server and are never shown again after saving. This profile can use its own OpenRouter key, or inherit the server-wide key when none is saved.</span>
+          </section>
+          <div class="backend-settings" id="key-settings"></div>
+
           <section class="field">
             <h3 class="settings-section-title">Local backends</h3>
             <span class="field-help">Clachan can talk to an OpenAI-compatible server on your LAN. Local backends are text-only: server tools, provider routing, reasoning effort, and image or PDF attachments stay OpenRouter-only. Each profile keeps its own addresses and keys.</span>

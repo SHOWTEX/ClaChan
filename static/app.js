@@ -114,6 +114,10 @@
     reasoningTrigger: document.getElementById("reasoning-trigger"),
     reasoningTriggerLabel: document.getElementById("reasoning-trigger-label"),
     reasoningDropup: document.getElementById("reasoning-dropup"),
+    webProviderMenu: document.getElementById("web-provider-menu"),
+    webProviderTrigger: document.getElementById("web-provider-trigger"),
+    webProviderTriggerLabel: document.getElementById("web-provider-trigger-label"),
+    webProviderDropup: document.getElementById("web-provider-dropup"),
     composerAttachments: document.getElementById("composer-attachments"),
     attachFile: document.getElementById("attach-file"),
     fileInput: document.getElementById("file-input"),
@@ -133,6 +137,8 @@
     userName: document.getElementById("user-name"),
     userPersona: document.getElementById("user-persona"),
     ignoredProviders: document.getElementById("ignored-providers"),
+    webProvider: document.getElementById("web-provider"),
+    keySettings: document.getElementById("key-settings"),
     backendSettings: document.getElementById("backend-settings"),
     theme: document.getElementById("theme"),
     saveSettings: document.getElementById("save-settings"),
@@ -1860,6 +1866,7 @@
       toolsEnabled: state.toolsEnabled,
       maxToolCalls: state.maxToolCalls,
       reasoningEffort: state.reasoningEffort,
+      webProvider: "",
       systemPrompt: (state.profile && state.profile.personaPrompt) || "",
       messages: [],
     };
@@ -1902,6 +1909,7 @@
       maxToolCalls: state.maxToolCalls,
       reasoningEffort: activeReasoningEffort(),
     };
+    if (!local && state.current.webProvider) request.webProvider = state.current.webProvider;
     const systemPrompt = String(state.current.systemPrompt || "").trim();
     if (systemPrompt) request.systemPrompt = systemPrompt;
 
@@ -2009,6 +2017,9 @@
       state.current.maxToolCalls = clampToolCalls(updated.maxToolCalls || 6);
       state.current.reasoningEffort = typeof updated.reasoningEffort === "string"
         ? updated.reasoningEffort
+        : "";
+      state.current.webProvider = typeof updated.webProvider === "string"
+        ? updated.webProvider
         : "";
       return true;
     } catch (err) {
@@ -2722,9 +2733,9 @@
       const provider = providerInfo();
       if (isLocalProvider(state.provider)) {
         toast((provider ? provider.label : "This chat's backend") +
-          " is not configured. Add it in Settings → Backends.");
+          " is not configured. Add it in Settings → Backends & keys.");
       } else {
-        toast("No OpenRouter API key is configured on the server.");
+        toast("No OpenRouter API key is configured for this profile. Add one in Settings → Backends & keys.");
       }
       return;
     }
@@ -2917,6 +2928,7 @@
       toolsEnabled: local ? false : state.toolsEnabled,
       maxToolCalls: local ? 0 : state.maxToolCalls,
       reasoningEffort: activeReasoningEffort(),
+      webProvider: local ? "" : conversationWebProvider(),
       timezone: localTimezone(),
       ...payload,
     };
@@ -3318,7 +3330,8 @@
     dom.reasoningTrigger.setAttribute("aria-expanded", open ? "true" : "false");
     if (!options.length && !dom.reasoningDropup.hidden) closeReasoningMenu();
     renderReasoningMenu(options);
-    dom.composerToolbar.hidden = dom.toolsToggle.hidden && dom.toolCapField.hidden && dom.reasoningMenu.hidden;
+    dom.composerToolbar.hidden = dom.toolsToggle.hidden && dom.toolCapField.hidden &&
+      dom.reasoningMenu.hidden && dom.webProviderMenu.hidden;
   }
 
   function renderReasoningMenu(options = reasoningOptions()) {
@@ -3384,6 +3397,105 @@
     dom.reasoningTrigger.setAttribute("aria-expanded", "false");
   }
 
+  function normalizeWebProvider(value) {
+    return String(value || "").trim().toLowerCase() === "tavily" ? "tavily" : "openrouter";
+  }
+
+  function profileWebProvider() {
+    return normalizeWebProvider(state.profile && state.profile.webProvider);
+  }
+
+  function conversationWebProvider() {
+    const value = String((state.current && state.current.webProvider) || "").trim().toLowerCase();
+    return value === "tavily" || value === "openrouter" ? value : "";
+  }
+
+  function effectiveWebProvider() {
+    return normalizeWebProvider(conversationWebProvider() || profileWebProvider());
+  }
+
+  function webProviderLabel(value) {
+    return normalizeWebProvider(value) === "tavily" ? "Tavily" : "OpenRouter";
+  }
+
+  function webProviderOptions() {
+    const profile = profileWebProvider();
+    const hasTavily = Boolean(state.profile && state.profile.hasTavilyKey);
+    return [
+      { value: "", label: "Profile default", note: webProviderLabel(profile) },
+      { value: "openrouter", label: "OpenRouter", note: "Search and fetch run at OpenRouter" },
+      { value: "tavily", label: "Tavily", note: hasTavily ? "Uses this profile's key" : "No Tavily key saved yet" },
+    ];
+  }
+
+  function updateWebProviderControl() {
+    const local = isLocalProvider(state.provider);
+    const visible = !local && Boolean(state.toolsEnabled);
+    dom.webProviderMenu.hidden = !visible;
+    if (!visible) {
+      closeWebProviderMenu();
+    }
+    const chosen = conversationWebProvider();
+    const effective = effectiveWebProvider();
+    dom.webProviderTriggerLabel.textContent = webProviderLabel(effective);
+    dom.webProviderTrigger.title = (chosen ? "This chat uses " : "Profile default: ") +
+      webProviderLabel(effective) + ". Click to change the web search provider.";
+    dom.webProviderTrigger.disabled = state.streaming || !visible;
+    if (state.streaming) closeWebProviderMenu();
+  }
+
+  function renderWebProviderMenu() {
+    dom.webProviderDropup.replaceChildren();
+    const head = el("div", "reasoning-head");
+    head.append(el("span", "reasoning-head-title", "Web search provider"));
+    head.append(el("span", "reasoning-head-note", "Applies to this chat"));
+    dom.webProviderDropup.append(head);
+
+    const chosen = conversationWebProvider();
+    for (const option of webProviderOptions()) {
+      const active = chosen === option.value;
+      const button = el("button", "reasoning-option" + (active ? " active" : ""));
+      button.type = "button";
+      button.dataset.webProvider = option.value;
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", active ? "true" : "false");
+      const labels = el("span", "reasoning-option-label");
+      labels.append(el("span", null, option.label));
+      if (option.note) labels.append(el("span", "reasoning-head-note", option.note));
+      button.append(labels);
+      if (active) button.append(el("span", "reasoning-option-check", "✓"));
+      button.addEventListener("click", () => chooseWebProvider(option.value));
+      dom.webProviderDropup.append(button);
+    }
+  }
+
+  function chooseWebProvider(value) {
+    if (state.streaming || !state.current) return;
+    const next = value === "tavily" || value === "openrouter" ? value : "";
+    state.current.webProvider = next;
+    closeWebProviderMenu();
+    updateWebProviderControl();
+    if (state.current.id) persistConversationSettings({ webProvider: next });
+  }
+
+  function toggleWebProviderMenu() {
+    if (dom.webProviderTrigger.disabled) return;
+    const open = dom.webProviderDropup.hidden;
+    if (open) {
+      renderWebProviderMenu();
+      dom.webProviderDropup.hidden = false;
+      dom.webProviderTrigger.setAttribute("aria-expanded", "true");
+    } else {
+      closeWebProviderMenu();
+    }
+  }
+
+  function closeWebProviderMenu() {
+    if (dom.webProviderDropup.hidden) return;
+    dom.webProviderDropup.hidden = true;
+    dom.webProviderTrigger.setAttribute("aria-expanded", "false");
+  }
+
   function localTimezone() {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -3416,6 +3528,7 @@
     syncAttachmentMode();
     updateAttachmentControls();
     updateReasoningControl();
+    updateWebProviderControl();
   }
 
   function syncAttachmentMode() {
@@ -4297,6 +4410,7 @@
   }
 
   function renderBackendSettings() {
+    renderKeySettings();
     if (!dom.backendSettings) return;
     dom.backendSettings.replaceChildren();
     const locals = state.backends.filter((backend) => backend.local);
@@ -4305,6 +4419,154 @@
       return;
     }
     for (const backend of locals) dom.backendSettings.append(backendCard(backend));
+  }
+
+  function keyStatus(name, text, kind = "") {
+    if (!dom.keySettings) return;
+    const card = dom.keySettings.querySelector('[data-key="' + name + '"]');
+    if (!card) return;
+    const status = card.querySelector('[data-role="status"]');
+    if (!status) return;
+    status.textContent = text || "";
+    status.className = "backend-card-status" + (kind ? " " + kind : "");
+  }
+
+  function keyInputCard(options) {
+    const card = el("section", "backend-card");
+    card.dataset.key = options.name;
+
+    const head = el("div", "backend-card-head");
+    const title = el("div", "backend-card-title");
+    title.append(el("span", "backend-card-name", options.title));
+    if (options.hint) title.append(el("span", "backend-card-hint", options.hint));
+    head.append(title);
+    head.append(el("span", "tag " + (options.hasKey ? "tag-good" : "tag-warn"), options.tag));
+    card.append(head);
+
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.spellcheck = false;
+    input.dataset.role = "key";
+    input.value = "";
+    input.placeholder = options.hasKey ? "Saved — leave blank to keep" : options.placeholder;
+    card.append(backendField("API key", input));
+
+    if (options.hasKey) {
+      const clearLabel = el("label", "toggle-row backend-clear-key");
+      const clearBox = document.createElement("input");
+      clearBox.type = "checkbox";
+      clearBox.dataset.role = "clear-key";
+      clearLabel.append(clearBox, el("span", null, options.clearLabel || "Remove the saved API key"));
+      card.append(clearLabel);
+    }
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      options.save(card);
+    });
+
+    const actions = el("div", "backend-card-actions");
+    const save = el("button", "btn btn-primary", "Save key");
+    save.type = "button";
+    save.addEventListener("click", () => options.save(card));
+    actions.append(save);
+    card.append(actions);
+
+    const status = el("span", "backend-card-status");
+    status.dataset.role = "status";
+    card.append(status);
+    return card;
+  }
+
+  function renderKeySettings() {
+    if (!dom.keySettings) return;
+    dom.keySettings.replaceChildren();
+
+    const openrouter = backendInfo("openrouter") || {};
+    const hasRouterKey = Boolean(openrouter.hasKey);
+    dom.keySettings.append(keyInputCard({
+      name: "openrouter",
+      title: "OpenRouter",
+      hint: "Cloud models, and the default engine for web search and fetch.",
+      hasKey: hasRouterKey,
+      tag: hasRouterKey ? "This profile" : (openrouter.serverKey ? "Server key" : "Not configured"),
+      placeholder: "sk-or-v1-…",
+      clearLabel: openrouter.serverKey
+        ? "Remove this profile's key and use the server key"
+        : "Remove the saved API key",
+      save: saveOpenRouterKey,
+    }));
+
+    const hasTavilyKey = Boolean(state.profile && state.profile.hasTavilyKey);
+    dom.keySettings.append(keyInputCard({
+      name: "tavily",
+      title: "Tavily",
+      hint: "Used only when this profile or chat selects Tavily for web search and fetch.",
+      hasKey: hasTavilyKey,
+      tag: hasTavilyKey ? "Saved" : "Not configured",
+      placeholder: "tvly-…",
+      save: saveTavilyKey,
+    }));
+  }
+
+  async function saveOpenRouterKey(card) {
+    const input = card.querySelector('[data-role="key"]');
+    const clear = card.querySelector('[data-role="clear-key"]');
+    const value = input ? String(input.value || "").trim() : "";
+    const clearKey = Boolean(clear && clear.checked);
+    if (!value && !clearKey) {
+      keyStatus("openrouter", "Enter a key, or tick the box to remove the saved one.", "bad");
+      return;
+    }
+
+    keyStatus("openrouter", "Saving…");
+    try {
+      await api("/api/backends/openrouter", {
+        method: "PUT",
+        body: clearKey ? { clearKey: true } : { apiKey: value },
+      });
+      await Promise.all([loadBackends(), loadModels()]);
+      renderBackendSettings();
+      updateModelTrigger();
+      updateNotice();
+      renderToolBar();
+      keyStatus("openrouter", "Saved.", "ok");
+      toast(clearKey ? "OpenRouter key removed." : "OpenRouter key saved.");
+    } catch (err) {
+      keyStatus("openrouter", err.message, "bad");
+      toast(err.message);
+    }
+  }
+
+  async function saveTavilyKey(card) {
+    const input = card.querySelector('[data-role="key"]');
+    const clear = card.querySelector('[data-role="clear-key"]');
+    const value = input ? String(input.value || "").trim() : "";
+    const clearKey = Boolean(clear && clear.checked);
+    if (!value && !clearKey) {
+      keyStatus("tavily", "Enter a key, or tick the box to remove the saved one.", "bad");
+      return;
+    }
+
+    keyStatus("tavily", "Saving…");
+    try {
+      const body = clearKey ? { clearTavilyKey: true } : { tavilyKey: value };
+      const updated = await api("/api/profile", { method: "PATCH", body });
+      state.profile = {
+        ...state.profile,
+        ...updated,
+        hasTavilyKey: Boolean(updated.hasTavilyKey),
+      };
+      renderKeySettings();
+      updateWebProviderControl();
+      keyStatus("tavily", "Saved.", "ok");
+      toast(clearKey ? "Tavily key removed." : "Tavily key saved.");
+    } catch (err) {
+      keyStatus("tavily", err.message, "bad");
+      toast(err.message);
+    }
   }
 
   function backendCard(backend) {
@@ -4580,6 +4842,7 @@
     dom.userName.value = (state.profile && state.profile.userName) || "";
     dom.userPersona.value = (state.profile && state.profile.userPersona) || "";
     dom.ignoredProviders.value = (state.profile && state.profile.ignoredProviders) || "";
+    dom.webProvider.value = profileWebProvider();
     dom.theme.value = state.theme;
     dom.settingsNote.textContent = state.current && state.current.id
       ? ""
@@ -4641,6 +4904,8 @@
     const oldPersonaPrompt = (state.profile && state.profile.personaPrompt) || "";
     const oldUserName = (state.profile && state.profile.userName) || "";
     const oldUserPersona = (state.profile && state.profile.userPersona) || "";
+    const oldWebProvider = profileWebProvider();
+    const webProvider = dom.webProvider.value === "tavily" ? "tavily" : "openrouter";
 
     if (state.current && state.current.id) {
       try {
@@ -4663,6 +4928,7 @@
     if (personaPrompt !== oldPersonaPrompt) patch.personaPrompt = personaPrompt;
     if (userName !== oldUserName) patch.userName = userName;
     if (userPersona !== oldUserPersona) patch.userPersona = userPersona;
+    if (webProvider !== oldWebProvider) patch.webProvider = webProvider;
 
     if (Object.keys(patch).length) {
       try {
@@ -4677,6 +4943,8 @@
           personaPrompt: updated.personaPrompt || "",
           userName: updated.userName || "",
           userPersona: updated.userPersona || "",
+          webProvider: updated.webProvider || "openrouter",
+          hasTavilyKey: Boolean(updated.hasTavilyKey),
         };
       } catch (err) {
         toast(err.message);
@@ -4706,6 +4974,7 @@
 
       updateHeading();
       renderMessages();
+      updateWebProviderControl();
     }
 
     setPref(PREFS.theme, theme);
@@ -5180,6 +5449,16 @@
     document.addEventListener("click", closeReasoningMenu);
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeReasoningMenu();
+    });
+
+    dom.webProviderTrigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleWebProviderMenu();
+    });
+    dom.webProviderDropup.addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", closeWebProviderMenu);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeWebProviderMenu();
     });
 
     dom.toolsToggle.addEventListener("click", () => {

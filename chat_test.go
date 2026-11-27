@@ -401,8 +401,12 @@ func TestChatSendsReasoningEffort(t *testing.T) {
 	defer upstream.Close()
 
 	env := newTestEnv(t, upstream)
+	provider, err := env.s.providerFor(context.Background(), env.profile.ID, providerOpenRouter)
+	if err != nil {
+		t.Fatalf("providerFor: %v", err)
+	}
 	env.s.models.models = map[string][]Model{
-		providerOpenRouter: {{
+		provider.cacheKey(): {{
 			ID:                "test/model",
 			SupportsReasoning: true,
 			Reasoning: &ReasoningInfo{
@@ -433,6 +437,188 @@ func TestChatSendsReasoningEffort(t *testing.T) {
 	}
 	if saved.ReasoningEffort != "low" {
 		t.Fatalf("saved effort = %q", saved.ReasoningEffort)
+	}
+}
+
+func TestChatRunsTavilyFunctionRound(t *testing.T) {
+	var requests int
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			reasoning := map[string]any{
+				"id": "rs_1", "type": "reasoning", "status": "completed",
+				"summary": []any{map[string]any{"type": "summary_text", "text": "Need a search."}},
+			}
+			call := map[string]any{
+				"id":        "fc_1",
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      tavilySearchFunction,
+				"arguments": `{"query":"latest Go release"}`,
+				"status":    "completed",
+			}
+			emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoning})
+			emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": call})
+			// Reasoning is deliberately absent here: some upstreams omit it
+			// from the terminal output, so its indexes shift down by one.
+			emitEvent(w, completedEvent([]any{call}))
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		emitTextResponse(w, "Tavily answer", []string{"Tavily answer"})
+	}))
+	defer upstream.Close()
+
+	var tavilyCalls int
+	tavily := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tavilyCalls++
+		if r.URL.Path != "/search" {
+			t.Errorf("Tavily path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tvly-live-key" {
+			t.Errorf("Tavily auth = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"query":"latest Go release","results":[
+			{"title":"Go release notes","url":"https://go.dev/doc/devel/release","content":"The latest release notes.","score":0.9}]}`)
+	}))
+	defer tavily.Close()
+
+	env := newTestEnv(t, upstream)
+	env.s.cfg.TavilyBaseURL = tavily.URL
+	box, err := newSecretBox([]byte("clachan-test-secret-key-0123456789"))
+	if err != nil {
+		t.Fatalf("newSecretBox: %v", err)
+	}
+	env.s.secrets = box
+	sealed, err := box.seal("tvly-live-key")
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	ctx := context.Background()
+	if err := env.s.store.updateProfileTavilyKey(ctx, env.profile.ID, sealed); err != nil {
+		t.Fatalf("save Tavily key: %v", err)
+	}
+	conv, err := env.s.store.createConversation(ctx, env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+	if err != nil {
+		t.Fatalf("createConversation: %v", err)
+	}
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(
+		`{"conversationId":%q,"content":"what is new","webProvider":"tavily","toolsEnabled":true}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if requests != 2 {
+		t.Fatalf("upstream requests = %d, want 2", requests)
+	}
+	if tavilyCalls != 1 {
+		t.Fatalf("Tavily calls = %d, want 1", tavilyCalls)
+	}
+	if !strings.Contains(bodies[0], `"function","name":"tavily_search"`) {
+		t.Fatalf("first request missing Tavily function tool: %s", bodies[0])
+	}
+	for _, want := range []string{`"type":"function_call_output"`, `"call_id":"call_1"`, `"type":"reasoning"`, "Need a search.", "Go release notes"} {
+		if !strings.Contains(bodies[1], want) {
+			t.Fatalf("second request missing %q: %s", want, bodies[1])
+		}
+	}
+
+	out := rec.Body.String()
+	for _, want := range []string{"event: step", `"provider":"tavily"`, "Tavily answer", `"citations"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("response missing %q:\n%s", want, out)
+		}
+	}
+
+	saved, err := env.s.store.getConversation(ctx, env.profile.ID, conv.ID)
+	if err != nil {
+		t.Fatalf("getConversation: %v", err)
+	}
+	if saved.WebProvider != webProviderTavily {
+		t.Fatalf("conversation web provider = %q", saved.WebProvider)
+	}
+	reply := saved.Messages[len(saved.Messages)-1]
+	if len(reply.Steps) != 1 || reply.Steps[0].Tool != "web_search" ||
+		reply.Steps[0].Provider != webProviderTavily {
+		t.Fatalf("steps = %+v", reply.Steps)
+	}
+	if len(reply.Citations) != 1 || reply.Citations[0].Title != "Go release notes" {
+		t.Fatalf("citations = %+v", reply.Citations)
+	}
+}
+
+func TestChatFallsBackToOpenRouterAfterTavilyFailure(t *testing.T) {
+	var requests int
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			reasoning := map[string]any{
+				"id": "rs_1", "type": "reasoning", "status": "completed",
+				"summary": []any{map[string]any{"type": "summary_text", "text": "Need a search."}},
+			}
+			call := map[string]any{
+				"id":        "fc_1",
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      tavilySearchFunction,
+				"arguments": `{"query":"latest Go release"}`,
+				"status":    "completed",
+			}
+			emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoning})
+			emitEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": call})
+			// Reasoning is deliberately absent here: some upstreams omit it
+			// from the terminal output, so its indexes shift down by one.
+			emitEvent(w, completedEvent([]any{call}))
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		emitTextResponse(w, "OpenRouter fallback answer", []string{"OpenRouter fallback answer"})
+	}))
+	defer upstream.Close()
+
+	tavily := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, `{"detail":{"error":"upstream unavailable"}}`)
+	}))
+	defer tavily.Close()
+
+	env := newTestEnv(t, upstream)
+	env.s.cfg.TavilyBaseURL = tavily.URL
+	box, _ := newSecretBox([]byte("clachan-test-secret-key-0123456789"))
+	env.s.secrets = box
+	sealed, _ := box.seal("tvly-live-key")
+	ctx := context.Background()
+	if err := env.s.store.updateProfileTavilyKey(ctx, env.profile.ID, sealed); err != nil {
+		t.Fatalf("save Tavily key: %v", err)
+	}
+	conv, _ := env.s.store.createConversation(ctx, env.profile.ID,
+		providerOpenRouter, "test/model", "", "", "", true, true, defaultToolCalls, "")
+
+	rec := postChat(t, env.s, env.profile, fmt.Sprintf(
+		`{"conversationId":%q,"content":"what is new","webProvider":"tavily","toolsEnabled":true}`, conv.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if requests != 2 {
+		t.Fatalf("upstream requests = %d, want 2", requests)
+	}
+	for _, want := range []string{`"openrouter:web_search"`, `"openrouter:web_fetch"`, "Tavily search failed"} {
+		if !strings.Contains(bodies[1], want) {
+			t.Fatalf("fallback request missing %q: %s", want, bodies[1])
+		}
+	}
+	if !strings.Contains(rec.Body.String(), "OpenRouter fallback answer") {
+		t.Fatalf("response missing answer:\n%s", rec.Body.String())
 	}
 }
 

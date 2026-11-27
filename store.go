@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   tools_enabled INTEGER NOT NULL DEFAULT 1,
   max_tool_calls INTEGER NOT NULL DEFAULT 6,
   reasoning_effort TEXT NOT NULL DEFAULT '',
+  web_provider  TEXT NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );`
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   persona_prompt TEXT NOT NULL DEFAULT '',
   user_name      TEXT NOT NULL DEFAULT '',
   user_persona   TEXT NOT NULL DEFAULT '',
+  openrouter_key TEXT NOT NULL DEFAULT '',
+  tavily_key     TEXT NOT NULL DEFAULT '',
+  web_provider   TEXT NOT NULL DEFAULT 'openrouter',
   created_at     INTEGER NOT NULL
 );`
 
@@ -147,6 +151,7 @@ type Conversation struct {
 	ToolsEnabled    bool      `json:"toolsEnabled"`
 	MaxToolCalls    int       `json:"maxToolCalls"`
 	ReasoningEffort string    `json:"reasoningEffort,omitempty"`
+	WebProvider     string    `json:"webProvider,omitempty"`
 	CreatedAt       int64     `json:"createdAt"`
 	UpdatedAt       int64     `json:"updatedAt"`
 	MessageCount    int       `json:"messageCount,omitempty"`
@@ -166,6 +171,7 @@ type ConversationUpdate struct {
 	ToolsEnabled    *bool
 	MaxToolCalls    *int
 	ReasoningEffort *string
+	WebProvider     *string
 }
 
 // Profile is the public shape of an account. Password material never crosses
@@ -181,6 +187,9 @@ type Profile struct {
 	PersonaPrompt    string `json:"personaPrompt,omitempty"`
 	UserName         string `json:"userName,omitempty"`
 	UserPersona      string `json:"userPersona,omitempty"`
+	WebProvider      string `json:"webProvider,omitempty"`
+	HasOpenRouterKey bool   `json:"hasOpenRouterKey,omitempty"`
+	HasTavilyKey     bool   `json:"hasTavilyKey,omitempty"`
 	CreatedAt        int64  `json:"createdAt"`
 }
 
@@ -267,6 +276,7 @@ func openStore(path string) (*Store, error) {
 		{"tools_enabled", "tools_enabled INTEGER NOT NULL DEFAULT 1"},
 		{"max_tool_calls", "max_tool_calls INTEGER NOT NULL DEFAULT 6"},
 		{"reasoning_effort", "reasoning_effort TEXT NOT NULL DEFAULT ''"},
+		{"web_provider", "web_provider TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := ensureColumn(ctx, db, "conversations", column.name, column.declaration); err != nil {
 			db.Close()
@@ -284,6 +294,9 @@ func openStore(path string) (*Store, error) {
 		{"persona_prompt", "persona_prompt TEXT NOT NULL DEFAULT ''"},
 		{"user_name", "user_name TEXT NOT NULL DEFAULT ''"},
 		{"user_persona", "user_persona TEXT NOT NULL DEFAULT ''"},
+		{"openrouter_key", "openrouter_key TEXT NOT NULL DEFAULT ''"},
+		{"tavily_key", "tavily_key TEXT NOT NULL DEFAULT ''"},
+		{"web_provider", "web_provider TEXT NOT NULL DEFAULT 'openrouter'"},
 	} {
 		if err := ensureColumn(ctx, db, "profiles", column.name, column.declaration); err != nil {
 			db.Close()
@@ -408,7 +421,7 @@ func (s *Store) createProfile(ctx context.Context, name, hash, salt string, iter
 	}
 
 	now := nowMillis()
-	p := &Profile{ID: newID(), Name: name, IsOwner: owner, CreatedAt: now}
+	p := &Profile{ID: newID(), Name: name, IsOwner: owner, CreatedAt: now, WebProvider: webProviderOpenRouter}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO profiles (id, name, password_hash, password_salt, password_iters, is_owner, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -432,7 +445,8 @@ func (s *Store) createProfile(ctx context.Context, name, hash, salt string, iter
 func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
-		        persona_name, persona_prompt, user_name, user_persona, created_at
+		        persona_name, persona_prompt, user_name, user_persona, web_provider,
+		        (openrouter_key != ''), (tavily_key != ''), created_at
 		 FROM profiles ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
@@ -444,7 +458,7 @@ func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 		var p Profile
 		if err := rows.Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider,
 			&p.IgnoredProviders, &p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona,
-			&p.CreatedAt); err != nil {
+			&p.WebProvider, &p.HasOpenRouterKey, &p.HasTavilyKey, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -455,7 +469,8 @@ func (s *Store) listProfiles(ctx context.Context) ([]Profile, error) {
 func (s *Store) profileByID(ctx context.Context, id string) (*profileAuth, error) {
 	return s.scanProfileAuth(ctx, `
 		SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
-		       persona_name, persona_prompt, user_name, user_persona, created_at,
+		       persona_name, persona_prompt, user_name, user_persona, web_provider,
+		       (openrouter_key != ''), (tavily_key != ''), created_at,
 		       password_hash, password_salt, password_iters
 		FROM profiles WHERE id = ?`, id)
 }
@@ -463,7 +478,8 @@ func (s *Store) profileByID(ctx context.Context, id string) (*profileAuth, error
 func (s *Store) profileByName(ctx context.Context, name string) (*profileAuth, error) {
 	return s.scanProfileAuth(ctx, `
 		SELECT id, name, is_owner, default_model, default_provider, ignored_providers,
-		       persona_name, persona_prompt, user_name, user_persona, created_at,
+		       persona_name, persona_prompt, user_name, user_persona, web_provider,
+		       (openrouter_key != ''), (tavily_key != ''), created_at,
 		       password_hash, password_salt, password_iters
 		FROM profiles WHERE name = ? COLLATE NOCASE`, name)
 }
@@ -472,7 +488,8 @@ func (s *Store) scanProfileAuth(ctx context.Context, query string, arg any) (*pr
 	var p profileAuth
 	err := s.db.QueryRowContext(ctx, query, arg).Scan(
 		&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider, &p.IgnoredProviders,
-		&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.CreatedAt,
+		&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.WebProvider,
+		&p.HasOpenRouterKey, &p.HasTavilyKey, &p.CreatedAt,
 		&p.PasswordHash, &p.PasswordSalt, &p.PasswordIters,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -557,6 +574,46 @@ func (s *Store) updateProfileUser(ctx context.Context, profileID, name, persona 
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE profiles SET user_name = ?, user_persona = ? WHERE id = ?",
 		name, persona, profileID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// profileSecretKeys returns the encrypted OpenRouter and Tavily keys. They are
+// decrypted only at the call site and are never part of Profile.
+func (s *Store) profileSecretKeys(ctx context.Context, profileID string) (openrouterKey, tavilyKey string, err error) {
+	err = s.db.QueryRowContext(ctx,
+		"SELECT openrouter_key, tavily_key FROM profiles WHERE id = ?", profileID).
+		Scan(&openrouterKey, &tavilyKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return openrouterKey, tavilyKey, err
+}
+
+func (s *Store) updateProfileOpenRouterKey(ctx context.Context, profileID, sealed string) error {
+	return s.updateProfileText(ctx, profileID, "openrouter_key", sealed)
+}
+
+func (s *Store) updateProfileTavilyKey(ctx context.Context, profileID, sealed string) error {
+	return s.updateProfileText(ctx, profileID, "tavily_key", sealed)
+}
+
+func (s *Store) updateProfileWebProvider(ctx context.Context, profileID, provider string) error {
+	return s.updateProfileText(ctx, profileID, "web_provider", provider)
+}
+
+func (s *Store) updateProfileText(ctx context.Context, profileID, column, value string) error {
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE profiles SET "+column+" = ? WHERE id = ?", value, profileID)
 	if err != nil {
 		return err
 	}
@@ -681,6 +738,51 @@ func (s *Store) listProfileBackends(ctx context.Context, profileID string) ([]Pr
 	return out, rows.Err()
 }
 
+type profileBackendRow struct {
+	ProfileID string
+	ProfileBackend
+}
+
+// listAllProfileBackends is used only by the startup secret migration.
+func (s *Store) listAllProfileBackends(ctx context.Context) ([]profileBackendRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT profile_id, backend_id, api_key
+		FROM profile_backends
+		WHERE api_key != ''
+		ORDER BY profile_id, backend_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []profileBackendRow{}
+	for rows.Next() {
+		var row profileBackendRow
+		if err := rows.Scan(&row.ProfileID, &row.BackendID, &row.APIKey); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) updateProfileBackendKey(ctx context.Context, profileID, backendID, sealed string) error {
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE profile_backends SET api_key = ? WHERE profile_id = ? AND backend_id = ?",
+		sealed, profileID, backendID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) profileBackend(ctx context.Context, profileID, backendID string) (*ProfileBackend, error) {
 	var b ProfileBackend
 	err := s.db.QueryRowContext(ctx, `
@@ -737,12 +839,14 @@ func (s *Store) sessionProfile(ctx context.Context, tokenHash string, now int64)
 	var p Profile
 	err := s.db.QueryRowContext(ctx, `
 		SELECT p.id, p.name, p.is_owner, p.default_model, p.default_provider, p.ignored_providers,
-		       p.persona_name, p.persona_prompt, p.user_name, p.user_persona, p.created_at
+		       p.persona_name, p.persona_prompt, p.user_name, p.user_persona, p.web_provider,
+		       (p.openrouter_key != ''), (p.tavily_key != ''), p.created_at
 		FROM sessions s
 		JOIN profiles p ON p.id = s.profile_id
 		WHERE s.token_hash = ? AND s.expires_at > ?`, tokenHash, now).
 		Scan(&p.ID, &p.Name, &p.IsOwner, &p.DefaultModel, &p.DefaultProvider, &p.IgnoredProviders,
-			&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.CreatedAt)
+			&p.PersonaName, &p.PersonaPrompt, &p.UserName, &p.UserPersona, &p.WebProvider,
+			&p.HasOpenRouterKey, &p.HasTavilyKey, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -894,7 +998,7 @@ func (s *Store) importConversation(ctx context.Context, profileID, title, provid
 func (s *Store) listConversations(ctx context.Context, profileID string) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.title, c.provider, c.model, c.provider_sort, c.provider_only, c.allow_fallbacks,
-		       c.tools_enabled, c.max_tool_calls, c.reasoning_effort,
+		       c.tools_enabled, c.max_tool_calls, c.reasoning_effort, c.web_provider,
 		       c.created_at, c.updated_at,
 		       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
 		       COALESCE((
@@ -920,7 +1024,7 @@ func (s *Store) listConversations(ctx context.Context, profileID string) ([]Conv
 	for rows.Next() {
 		var c Conversation
 		if err := rows.Scan(&c.ID, &c.Title, &c.Provider, &c.Model, &c.ProviderSort, &c.ProviderOnly, &c.AllowFallbacks,
-			&c.ToolsEnabled, &c.MaxToolCalls, &c.ReasoningEffort,
+			&c.ToolsEnabled, &c.MaxToolCalls, &c.ReasoningEffort, &c.WebProvider,
 			&c.CreatedAt, &c.UpdatedAt, &c.MessageCount, &c.Preview); err != nil {
 			return nil, err
 		}
@@ -934,11 +1038,11 @@ func (s *Store) getConversation(ctx context.Context, profileID, id string) (*Con
 	var c Conversation
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, title, provider, model, system_prompt, provider_sort, provider_only, allow_fallbacks,
-		       tools_enabled, max_tool_calls, reasoning_effort, created_at, updated_at
+		       tools_enabled, max_tool_calls, reasoning_effort, web_provider, created_at, updated_at
 		FROM conversations WHERE id = ? AND profile_id = ?`, id, profileID).
 		Scan(&c.ID, &c.Title, &c.Provider, &c.Model, &c.SystemPrompt,
 			&c.ProviderSort, &c.ProviderOnly, &c.AllowFallbacks,
-			&c.ToolsEnabled, &c.MaxToolCalls, &c.ReasoningEffort, &c.CreatedAt, &c.UpdatedAt)
+			&c.ToolsEnabled, &c.MaxToolCalls, &c.ReasoningEffort, &c.WebProvider, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1045,6 +1149,10 @@ func (s *Store) updateConversation(ctx context.Context, profileID, id string, up
 	if upd.ReasoningEffort != nil {
 		sets = append(sets, "reasoning_effort = ?")
 		args = append(args, strings.TrimSpace(*upd.ReasoningEffort))
+	}
+	if upd.WebProvider != nil {
+		sets = append(sets, "web_provider = ?")
+		args = append(args, strings.TrimSpace(*upd.WebProvider))
 	}
 	if len(sets) == 0 {
 		return nil
@@ -1468,11 +1576,11 @@ func (s *Store) branchConversation(ctx context.Context, profileID, sourceID, mes
 	var src Conversation
 	err = tx.QueryRowContext(ctx, `
 		SELECT title, provider, model, system_prompt, provider_sort, provider_only,
-		       allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort
+		       allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort, web_provider
 		FROM conversations WHERE id = ? AND profile_id = ?`, sourceID, profileID).
 		Scan(&src.Title, &src.Provider, &src.Model, &src.SystemPrompt,
 			&src.ProviderSort, &src.ProviderOnly, &src.AllowFallbacks,
-			&src.ToolsEnabled, &src.MaxToolCalls, &src.ReasoningEffort)
+			&src.ToolsEnabled, &src.MaxToolCalls, &src.ReasoningEffort, &src.WebProvider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1504,15 +1612,16 @@ func (s *Store) branchConversation(ctx context.Context, profileID, sourceID, mes
 		ToolsEnabled:    src.ToolsEnabled,
 		MaxToolCalls:    src.MaxToolCalls,
 		ReasoningEffort: src.ReasoningEffort,
+		WebProvider:     src.WebProvider,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO conversations (id, profile_id, title, provider, model, system_prompt, provider_sort, provider_only, allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO conversations (id, profile_id, title, provider, model, system_prompt, provider_sort, provider_only, allow_fallbacks, tools_enabled, max_tool_calls, reasoning_effort, web_provider, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, profileID, c.Title, c.Provider, c.Model, c.SystemPrompt,
 		c.ProviderSort, c.ProviderOnly, boolInt(c.AllowFallbacks),
-		boolInt(c.ToolsEnabled), c.MaxToolCalls, c.ReasoningEffort, c.CreatedAt, c.UpdatedAt); err != nil {
+		boolInt(c.ToolsEnabled), c.MaxToolCalls, c.ReasoningEffort, c.WebProvider, c.CreatedAt, c.UpdatedAt); err != nil {
 		return nil, err
 	}
 

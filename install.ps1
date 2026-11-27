@@ -57,7 +57,7 @@ Options:
 
 Environment:
   CLACHAN_REPO, CLACHAN_RELEASE, CLACHAN_API_KEY, CLACHAN_PORT,
-  CLACHAN_INSTALL_DIR, CLACHAN_NO_PROMPT, CLACHAN_BASE_URL
+  CLACHAN_INSTALL_DIR, CLACHAN_BASE_URL
 "@
 }
 
@@ -80,25 +80,12 @@ function Write-TextFile {
 }
 
 function Read-ApiKey {
+    # API keys are normally added per profile in the app. CLACHAN_API_KEY is
+    # kept for unattended installs that want a server-wide OpenRouter fallback.
     if ($env:CLACHAN_API_KEY) {
         return $env:CLACHAN_API_KEY
     }
-    if ($env:CLACHAN_NO_PROMPT -or -not [Environment]::UserInteractive) {
-        return ""
-    }
-
-    $secure = Read-Host -AsSecureString "OpenRouter API key (leave blank to set later)"
-    if ($null -eq $secure -or $secure.Length -eq 0) {
-        return ""
-    }
-
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    }
+    return ""
 }
 
 function Get-EnvValue {
@@ -625,7 +612,8 @@ Get-CimInstance Win32_Process -Filter "Name = 'clachan.exe'" -ErrorAction Silent
     Write-Host "  Logs:    $LogDir"
     if (-not (Get-EnvValue -Path $EnvFile -Key "OPENROUTER_API_KEY")) {
         Write-Host ""
-        Write-Host "Set OPENROUTER_API_KEY in $EnvFile, then restart Clachan from the Start Menu." -ForegroundColor Yellow
+        Write-Host "Add OpenRouter, Tavily, or local backend keys per profile in Settings -> Backends & keys." -ForegroundColor Yellow
+        Write-Host "For a server-wide fallback instead, set OPENROUTER_API_KEY in $EnvFile and restart Clachan." -ForegroundColor Yellow
     }
     Write-Host ""
     Write-Host "Update: powershell -NoProfile -ExecutionPolicy Bypass -Command `"irm $LatestBase/install.ps1 | iex`""

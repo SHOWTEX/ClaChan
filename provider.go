@@ -58,6 +58,18 @@ func (p *Provider) enabled() bool {
 	return p.APIKey != ""
 }
 
+// cacheKey separates cached catalogues when profiles use different OpenRouter
+// keys. The key itself never leaves the server or reaches logs.
+func (p *Provider) cacheKey() string {
+	if p == nil {
+		return ""
+	}
+	if p.Local {
+		return p.ID
+	}
+	return p.ID + ":" + keyFingerprint(p.APIKey)
+}
+
 func (p *Provider) headers(req *http.Request) {
 	if p.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
@@ -74,9 +86,29 @@ func (p *Provider) headers(req *http.Request) {
 }
 
 type responseInputMessage struct {
-	Type    string `json:"type,omitempty"`
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Type      string `json:"type,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Content   any    `json:"content,omitempty"`
+	ID        string `json:"id,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Status    string `json:"status,omitempty"`
+
+	// raw replays an upstream output item unchanged. Reasoning items carry
+	// provider-specific fields (signature, encrypted_content) that the typed
+	// fields cannot reproduce, and OpenRouter requires them to be sent back
+	// as-is when a stateless function-call round continues.
+	raw json.RawMessage `json:"-"`
+}
+
+func (m responseInputMessage) MarshalJSON() ([]byte, error) {
+	if len(m.raw) > 0 {
+		return m.raw, nil
+	}
+	type plain responseInputMessage
+	return json.Marshal(plain(m))
 }
 
 type reasoningRequest struct {
@@ -345,6 +377,7 @@ func upstreamErrorMessage(resp *http.Response) string {
 
 type modelCache struct {
 	mu        sync.RWMutex
+	fetchMu   sync.Mutex
 	client    *http.Client
 	log       *slog.Logger
 	models    map[string][]Model
@@ -403,9 +436,10 @@ func (c *modelCache) fetchedAtTime() time.Time {
 }
 
 func (c *modelCache) refresh(ctx context.Context, providers map[string]*Provider, full bool) {
-	for id, p := range providers {
+	for _, p := range providers {
+		id := p.cacheKey()
 		if !p.enabled() {
-			c.setErr(id, "OPENROUTER_API_KEY is not set on the server")
+			c.setErr(id, "No API key is configured for this provider")
 			continue
 		}
 
@@ -422,7 +456,7 @@ func (c *modelCache) refresh(ctx context.Context, providers map[string]*Provider
 
 		models, err := c.fetch(ctx, p)
 		if err != nil {
-			c.log.Warn("model list fetch failed", "provider", id, "err", err)
+			c.log.Warn("model list fetch failed", "provider", p.ID, "err", err)
 			c.setErr(id, err.Error())
 			continue
 		}
@@ -433,7 +467,7 @@ func (c *modelCache) refresh(ctx context.Context, providers map[string]*Provider
 		c.lastOK[id] = time.Now()
 		c.fetchedAt = time.Now()
 		c.mu.Unlock()
-		c.log.Info("model list cached", "provider", id, "models", len(models))
+		c.log.Info("model list cached", "provider", p.ID, "models", len(models))
 	}
 }
 
@@ -646,15 +680,16 @@ func validReasoningEffort(value string) bool {
 	return false
 }
 
-func (c *modelCache) lookup(providerID, modelID string) *Model {
-	if c == nil {
+func (c *modelCache) lookup(p *Provider, modelID string) *Model {
+	if c == nil || p == nil {
 		return nil
 	}
+	key := p.cacheKey()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for i := range c.models[providerID] {
-		if c.models[providerID][i].ID == modelID {
-			model := c.models[providerID][i]
+	for i := range c.models[key] {
+		if c.models[key][i].ID == modelID {
+			model := c.models[key][i]
 			return &model
 		}
 	}
@@ -710,9 +745,10 @@ func resolveNextURL(current, next string) string {
 // uptime, quantization, and native tools.
 func (c *modelCache) endpointsFor(ctx context.Context, p *Provider, modelID string) ([]Endpoint, error) {
 	now := time.Now()
+	cacheKey := p.cacheKey() + ":" + modelID
 
 	c.mu.Lock()
-	entry, ok := c.endpoints[modelID]
+	entry, ok := c.endpoints[cacheKey]
 	c.mu.Unlock()
 	if ok {
 		ttl := endpointTTL
@@ -746,12 +782,12 @@ func (c *modelCache) endpointsFor(ctx context.Context, p *Provider, modelID stri
 	cached := endpointEntry{fetched: time.Now()}
 	if err != nil {
 		cached.err = err.Error()
-		c.endpoints[modelID] = cached
+		c.endpoints[cacheKey] = cached
 		c.mu.Unlock()
 		return nil, err
 	}
 	cached.endpoints = endpoints
-	c.endpoints[modelID] = cached
+	c.endpoints[cacheKey] = cached
 	c.mu.Unlock()
 
 	return endpoints, nil
@@ -1026,13 +1062,14 @@ func (c *modelCache) snapshot(providers map[string]*Provider) ([]ProviderModels,
 	out := make([]ProviderModels, 0, len(ids))
 	for _, id := range ids {
 		p := providers[id]
+		key := p.cacheKey()
 		out = append(out, ProviderModels{
 			ID:           id,
 			Label:        p.Label,
 			Enabled:      p.enabled(),
 			DefaultModel: p.DefaultModel,
-			Models:       c.models[id],
-			Error:        c.errs[id],
+			Models:       c.models[key],
+			Error:        c.errs[key],
 		})
 	}
 
@@ -1041,4 +1078,76 @@ func (c *modelCache) snapshot(providers map[string]*Provider) ([]ProviderModels,
 		fetched = c.fetchedAt.UnixMilli()
 	}
 	return out, fetched
+}
+
+// snapshotFor returns just the signed-in profile's provider entry. The browser
+// only ever needs one OpenRouter catalogue: the one for its own key.
+func (c *modelCache) snapshotFor(p *Provider) (ProviderModels, int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	key := p.cacheKey()
+	out := ProviderModels{
+		ID:           p.ID,
+		Label:        p.Label,
+		Enabled:      p.enabled(),
+		DefaultModel: p.DefaultModel,
+		Models:       c.models[key],
+		Error:        c.errs[key],
+	}
+	var fetched int64
+	if !c.fetchedAt.IsZero() {
+		fetched = c.fetchedAt.UnixMilli()
+	}
+	return out, fetched
+}
+
+// ensure fetches a catalogue on demand. The background refresher knows only
+// the server-wide key; per-profile keys are warmed when that profile opens the
+// model picker or settings.
+func (c *modelCache) ensure(ctx context.Context, p *Provider) {
+	if c == nil || p == nil || !p.enabled() {
+		return
+	}
+	key := p.cacheKey()
+
+	c.mu.RLock()
+	count := len(c.models[key])
+	lastErr := c.errs[key]
+	okAt := c.lastOK[key]
+	c.mu.RUnlock()
+	if count > 0 && lastErr == "" && time.Since(okAt) < 6*time.Hour {
+		return
+	}
+	if lastErr != "" && time.Since(okAt) < time.Minute {
+		return
+	}
+
+	c.fetchMu.Lock()
+	defer c.fetchMu.Unlock()
+
+	c.mu.RLock()
+	count = len(c.models[key])
+	lastErr = c.errs[key]
+	okAt = c.lastOK[key]
+	c.mu.RUnlock()
+	if count > 0 && lastErr == "" && time.Since(okAt) < 6*time.Hour {
+		return
+	}
+	if lastErr != "" && time.Since(okAt) < time.Minute {
+		return
+	}
+
+	models, err := c.fetch(ctx, p)
+	if err != nil {
+		c.log.Warn("on-demand model list fetch failed", "provider", p.ID, "err", err)
+		c.setErr(key, err.Error())
+		return
+	}
+	c.mu.Lock()
+	c.models[key] = models
+	c.errs[key] = ""
+	c.lastOK[key] = time.Now()
+	c.fetchedAt = time.Now()
+	c.mu.Unlock()
+	c.log.Info("model list cached", "provider", p.ID, "models", len(models))
 }

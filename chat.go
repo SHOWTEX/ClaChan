@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -32,6 +30,7 @@ type chatRequest struct {
 	ToolsEnabled    *bool        `json:"toolsEnabled,omitempty"`
 	MaxToolCalls    *int         `json:"maxToolCalls,omitempty"`
 	ReasoningEffort *string      `json:"reasoningEffort,omitempty"`
+	WebProvider     string       `json:"webProvider,omitempty"`
 	Timezone        string       `json:"timezone,omitempty"`
 	Action          string       `json:"action,omitempty"` // "", "regenerate", "edit"
 	MessageID       string       `json:"messageId,omitempty"`
@@ -190,7 +189,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !provider.enabled() {
-		message := "No OpenRouter API key is configured on the server."
+		message := "No OpenRouter API key is configured for this profile. Add one in Settings → Backends & keys."
 		if provider.Local {
 			message = provider.Label + " is not configured for this profile."
 		}
@@ -249,7 +248,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if reasoningEffort != "" {
-			if info := s.models.lookup(provider.ID, model); info != nil {
+			if info := s.models.lookup(provider, model); info != nil {
 				if info.Reasoning == nil || len(info.Reasoning.SupportedEfforts) == 0 {
 					writeError(w, http.StatusBadRequest, "bad_request",
 						"This model does not expose reasoning effort.", 0)
@@ -269,6 +268,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		timezone = "UTC"
 	}
 
+	webProvider := strings.TrimSpace(req.WebProvider)
+	if webProvider != "" && !validWebProvider(webProvider) {
+		writeError(w, http.StatusBadRequest, "bad_request", "Unknown web search provider.", 0)
+		return
+	}
+	if webProvider == "" {
+		webProvider = strings.TrimSpace(conv.WebProvider)
+	}
+	if webProvider == "" {
+		webProvider = strings.TrimSpace(profile.WebProvider)
+	}
+	webProvider = normalizeWebProvider(webProvider)
+	// Keep the user's explicit per-chat choice separate from the runtime
+	// fallback used when a Tavily key is missing.
+	requestedWebProvider := webProvider
+
 	history := conv.Messages
 	var userContent string
 	var userAttachments []Attachment
@@ -285,6 +300,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request",
 			"reuseTools only applies to a regenerated reply.", 0)
 		return
+	}
+
+	// Tavily runs through Clachan. If the profile selected it but has no key,
+	// OpenRouter is the graceful fallback instead of failing the whole reply.
+	tavilyKey := ""
+	if !provider.Local && webProvider == webProviderTavily && toolsEnabled && !researchOnly {
+		key, err := s.profileTavilyKey(r.Context(), profile.ID)
+		if err != nil {
+			s.log.Warn("load Tavily key", "err", err, "profile", profile.ID)
+		}
+		if key == "" {
+			webProvider = webProviderOpenRouter
+		} else {
+			tavilyKey = key
+		}
 	}
 
 	switch req.Action {
@@ -382,9 +412,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		if researchOnly {
 			serverTools = nil
 		} else {
-			serverTools = buildServerTools(toolsEnabled, timezone, toolCalls)
+			serverTools = buildServerTools(webProvider, toolsEnabled, timezone, toolCalls)
 		}
-		if info := s.models.lookup(provider.ID, model); info != nil && info.SupportsReasoning {
+		if info := s.models.lookup(provider, model); info != nil && info.SupportsReasoning {
 			reasoning = &reasoningRequest{Summary: "auto"}
 			if reasoningEffort != "" {
 				reasoning.Effort = reasoningEffort
@@ -464,12 +494,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Local backends ignore these, so do not overwrite the conversation's saved
 	// OpenRouter tool and reasoning settings with the local defaults.
-	if !provider.Local && (req.ToolsEnabled != nil || req.MaxToolCalls != nil || req.ReasoningEffort != nil) {
-		_ = s.store.updateConversation(writeCtx, profile.ID, conv.ID, ConversationUpdate{
+	if !provider.Local && (req.ToolsEnabled != nil || req.MaxToolCalls != nil || req.ReasoningEffort != nil || strings.TrimSpace(req.WebProvider) != "") {
+		update := ConversationUpdate{
 			ToolsEnabled:    &toolsEnabled,
 			MaxToolCalls:    &toolCalls,
 			ReasoningEffort: &reasoningEffort,
-		})
+		}
+		if strings.TrimSpace(req.WebProvider) != "" {
+			update.WebProvider = &requestedWebProvider
+		}
+		_ = s.store.updateConversation(writeCtx, profile.ID, conv.ID, update)
 	}
 
 	assistantID := newID()
@@ -503,300 +537,40 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var content strings.Builder
-	// Buffered providers can deliver the answer only in terminal events
-	// (output_text.done, content_part.done) instead of incremental deltas.
-	var doneText string
-	var capturedUsage *usage
-	var completed *responsesResult
-	finishReason := ""
-	streamErr := ""
-	eventCounts := make(map[string]int)
-	decodeErrors := 0
-	// A terminal upstream event ([DONE], response.completed, response.incomplete
-	// or response.failed). Without one, the stream was cut short.
-	terminalSeen := false
-	clientGone := false
+	loop := s.runChatLoop(chatLoopOptions{
+		resp:         resp,
+		sse:          sse,
+		provider:     provider,
+		profile:      profile,
+		conv:         conv,
+		model:        model,
+		systemPrompt: systemPrompt,
+		input:        msgs,
+		tools:        serverTools,
+		reasoning:    reasoning,
+		toolsEnabled: toolsEnabled,
+		toolCalls:    toolCalls,
+		webProvider:  webProvider,
+		tavilyKey:    tavilyKey,
+		timezone:     timezone,
+		watchdog:     watchdog,
+		ctx:          upCtx,
+		requestCtx:   r.Context(),
+	})
+	text := loop.text
+	finalReasoning := loop.reasoning
+	steps := loop.steps
+	citations := loop.citations
+	capturedUsage := loop.usage
+	finishReason := loop.finishReason
+	streamErr := loop.streamErr
+	clientGone := loop.clientGone
+	eventCounts := loop.eventCounts
+	decodeErrors := loop.decodeErrors
 
-	var citations []Citation
-	citationIndex := make(map[string]int)
-
-	addCitation := func(value annotation) (Citation, bool) {
-		citation, ok := value.citation()
-		if !ok {
-			return Citation{}, false
-		}
-		if index, seen := citationIndex[citation.URL]; seen {
-			existing := &citations[index]
-			changed := false
-			if existing.Title == "" && citation.Title != "" {
-				existing.Title = citation.Title
-				changed = true
-			}
-			if existing.Excerpt == "" && citation.Excerpt != "" {
-				existing.Excerpt = citation.Excerpt
-				changed = true
-			}
-			return *existing, changed
-		}
-		citationIndex[citation.URL] = len(citations)
-		citations = append(citations, citation)
-		return citation, true
-	}
-	send := func(name string, payload any) bool {
-		if err := sse.event(name, payload); err != nil {
-			clientGone = true
-			cancel()
-			return false
-		}
-		return true
-	}
-
-	outputByIndex := make(map[int]responseItem)
-	itemStarted := make(map[int]time.Time)
-	reasoningByIndex := make(map[int]string)
-	reasoningStreamed := make(map[int]bool)
-	var pendingReasoning []string
-	var streamedSteps []ChatStep
-
-	reader := bufio.NewReaderSize(resp.Body, 32<<10)
-
-read:
-	for {
-		line, readErr := reader.ReadString('\n')
-		if len(line) > 0 {
-			watchdog.Reset(idleStreamTimeout)
-
-			data, done := parseSSELine(line)
-			if done {
-				terminalSeen = true
-				break
-			}
-			if data == "" {
-				continue
-			}
-
-			var envelope struct {
-				Type string `json:"type"`
-			}
-			if err := json.Unmarshal([]byte(data), &envelope); err != nil || envelope.Type == "" {
-				decodeErrors++
-				continue
-			}
-			eventCounts[envelope.Type]++
-
-			var event responsesEvent
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				// One unexpected field type must not throw away an entire text
-				// delta, so keep the fields that matter and carry on.
-				decodeErrors++
-				event = responsesEvent{
-					Type:    envelope.Type,
-					Delta:   stringField(data, "delta"),
-					Text:    stringField(data, "text"),
-					Refusal: stringField(data, "refusal"),
-					ItemID:  stringField(data, "item_id"),
-				}
-			}
-
-			switch event.Type {
-			case "response.output_item.added":
-				if event.Item != nil {
-					outputByIndex[event.OutputIndex] = *event.Item
-					itemStarted[event.OutputIndex] = time.Now()
-				}
-
-			case "response.output_item.done":
-				if event.Item == nil {
-					continue
-				}
-				item := *event.Item
-				outputByIndex[event.OutputIndex] = item
-				start := itemStarted[event.OutputIndex]
-				if start.IsZero() {
-					start = time.Now()
-				}
-
-				if item.Type == "reasoning" {
-					if !reasoningStreamed[event.OutputIndex] {
-						if text := item.reasoningText(); text != "" {
-							reasoningByIndex[event.OutputIndex] = text
-							if !send("reasoning", reasoningEvent{
-								Text:        text,
-								ItemID:      item.ID,
-								OutputIndex: event.OutputIndex,
-							}) {
-								break read
-							}
-						}
-					}
-					if text := strings.TrimSpace(reasoningByIndex[event.OutputIndex]); text != "" {
-						pendingReasoning = append(pendingReasoning, text)
-					}
-					continue
-				}
-
-				if !isResponseToolType(item.Type) {
-					continue
-				}
-				step := buildResponseStep(&item, strings.Join(pendingReasoning, "\n\n"),
-					citationMap(citations), time.Since(start))
-				pendingReasoning = nil
-				streamedSteps = append(streamedSteps, step)
-				if !send("step", stepEvent{Step: step}) {
-					break read
-				}
-
-			case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-				if event.Delta == "" {
-					continue
-				}
-				reasoningStreamed[event.OutputIndex] = true
-				reasoningByIndex[event.OutputIndex] += event.Delta
-				if !send("reasoning", reasoningEvent{
-					Text:        event.Delta,
-					ItemID:      event.ItemID,
-					OutputIndex: event.OutputIndex,
-				}) {
-					break read
-				}
-
-			case "response.output_text.delta":
-				if event.Delta == "" {
-					continue
-				}
-				content.WriteString(event.Delta)
-				if !send("delta", deltaEvent{Text: event.Delta}) {
-					break read
-				}
-
-			case "response.refusal.delta":
-				if event.Delta == "" {
-					continue
-				}
-				content.WriteString(event.Delta)
-				if !send("delta", deltaEvent{Text: event.Delta}) {
-					break read
-				}
-
-			case "response.output_text.done":
-				if event.Text != "" {
-					doneText = event.Text
-				}
-
-			case "response.refusal.done":
-				if event.Refusal != "" {
-					doneText = event.Refusal
-				}
-
-			case "response.content_part.done":
-				if event.Part != nil {
-					switch {
-					case event.Part.Text != "":
-						doneText = event.Part.Text
-					case event.Part.Refusal != "":
-						doneText = event.Part.Refusal
-					}
-				}
-
-			case "response.output_text.annotation.added":
-				if event.Annotation == nil {
-					continue
-				}
-				citation, changed := addCitation(*event.Annotation)
-				if changed && !send("citation", citationEvent{Citations: []Citation{citation}}) {
-					break read
-				}
-
-			case "response.completed":
-				terminalSeen = true
-				completed = event.Response
-				if completed == nil {
-					continue
-				}
-				capturedUsage = completed.Usage
-				switch {
-				case completed.IncompleteDetails != nil && completed.IncompleteDetails.Reason != "":
-					finishReason = completed.IncompleteDetails.Reason
-				case completed.Status != "":
-					finishReason = completed.Status
-				}
-				if completed.Error != nil {
-					streamErr = truncate(completed.Error.Message, 300)
-				}
-				for index, item := range completed.Output {
-					outputByIndex[index] = item
-				}
-
-			case "response.incomplete", "response.failed":
-				terminalSeen = true
-				if event.Response != nil {
-					capturedUsage = event.Response.Usage
-					if event.Response.Error != nil {
-						streamErr = truncate(event.Response.Error.Message, 300)
-					}
-					if event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason != "" {
-						finishReason = event.Response.IncompleteDetails.Reason
-					}
-				}
-				if streamErr == "" {
-					streamErr = provider.Label + " stopped before the reply was complete."
-				}
-
-			case "error":
-				if event.Error != nil {
-					streamErr = truncate(event.Error.Message, 300)
-				}
-				if streamErr == "" {
-					streamErr = provider.Label + " reported an error mid-stream."
-				}
-			}
-		}
-
-		if readErr != nil {
-			if readErr != io.EOF && !clientGone && !stalled.Load() && r.Context().Err() == nil && upCtx.Err() == nil {
-				streamErr = "The connection to " + provider.Label + " dropped."
-			}
-			break
-		}
-	}
-
-	if r.Context().Err() != nil {
-		clientGone = true
-	}
 	timedOut := !clientGone && !stalled.Load() && errors.Is(upCtx.Err(), context.DeadlineExceeded)
-	// A clean EOF from OpenRouter without any terminal event means the stream
-	// was truncated, not finished. Say so instead of presenting a partial reply
-	// as complete.
-	if !clientGone && !timedOut && !stalled.Load() && !terminalSeen && streamErr == "" {
-		streamErr = "The connection to " + provider.Label + " closed before the reply finished."
-	}
-
-	indices := make([]int, 0, len(outputByIndex))
-	for index := range outputByIndex {
-		indices = append(indices, index)
-	}
-	sort.Ints(indices)
-	orderedOutput := make([]responseItem, 0, len(indices))
-	for _, index := range indices {
-		orderedOutput = append(orderedOutput, outputByIndex[index])
-	}
-
-	text := content.String()
-	if final := lastResponseMessageText(orderedOutput); final != "" {
-		text = final
-	}
-	if strings.TrimSpace(text) == "" && strings.TrimSpace(doneText) != "" {
-		text = doneText
-	}
-	if strings.TrimSpace(text) == "" && completed != nil && strings.TrimSpace(completed.OutputText) != "" {
-		text = completed.OutputText
-	}
-	steps, finalReasoning := buildResponseTranscript(orderedOutput, reasoningByIndex, citations)
-	if len(steps) == 0 && len(streamedSteps) > 0 {
-		steps = streamedSteps
-	}
 	toolRun := buildToolRun(toolsEnabled, toolCalls, capturedUsage, activitiesFromSteps(steps))
+
 	if researchOnly {
 		// The rewrite ran without tools; keep the transcript the reply already
 		// had so the UI still shows the research behind the new answer.

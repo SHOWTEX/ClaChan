@@ -1,6 +1,6 @@
 # Clachan
 
-[![Version](https://img.shields.io/badge/version-1.1.4-blue)](https://github.com/SHOWTEX/ClaChan/releases)
+[![Version](https://img.shields.io/badge/version-1.1.5-blue)](https://github.com/SHOWTEX/ClaChan/releases)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-lightgrey)
@@ -26,10 +26,10 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 ```
 
 The installer supports `linux/amd64` and `linux/arm64`. It creates a `clachan`
-service user and `/opt/clachan`, writes `/etc/clachan/clachan.env`, asks for your
-OpenRouter key, installs a hardened systemd unit, and starts the service. The
-database lives in `/opt/clachan/data`. It prints the LAN URL when the health
-check passes.
+service user and `/opt/clachan`, writes `/etc/clachan/clachan.env`, installs a
+hardened systemd unit, and starts the service. API keys are added per profile in
+the app after the first sign-in. The database lives in `/opt/clachan/data`. It
+prints the LAN URL when the health check passes.
 
 Use a 64-bit Raspberry Pi OS. 32-bit ARM builds are not published.
 
@@ -42,9 +42,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/S
 ```
 
 The installer is per user and does not need administrator rights. It installs to
-`%LOCALAPPDATA%\Clachan`, asks for your OpenRouter key, registers a start-at-login
-task, starts the server, and opens the browser. The Start Menu gets **Clachan**,
-**Stop Clachan**, and **Uninstall Clachan** shortcuts.
+`%LOCALAPPDATA%\Clachan`, registers a start-at-login task, starts the server, and
+opens the browser. Add API keys per profile in Settings after signing in. The
+Start Menu gets **Clachan**, **Stop Clachan**, and **Uninstall Clachan**
+shortcuts.
 
 The Windows binary is unsigned, so SmartScreen may show a warning. Choose **More
 info → Run anyway**. If Windows Firewall asks, allow Clachan on **Private
@@ -58,7 +59,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create
 
 Open `http://<server-address>:7654` on Linux, or <http://localhost:7654> on
 Windows. The first visit creates the owner profile. No accounts, conversations,
-custom presets, or API keys are shipped with the repository.
+custom presets, or API keys are shipped with the repository. After signing in,
+add keys in **Settings → Backends & keys**.
 
 ## Update
 
@@ -74,8 +76,8 @@ curl -fsSL https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.s
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/SHOWTEX/ClaChan/releases/latest/download/install.ps1 | iex"
 ```
 
-To pin a version, download the installer and pass `--release v1.1.4` (Linux) or
-`-Release v1.1.4` (Windows).
+To pin a version, download the installer and pass `--release v1.1.5` (Linux) or
+`-Release v1.1.5` (Windows).
 
 ## Uninstall
 
@@ -118,13 +120,18 @@ Uninstall keeps each platform's configuration and database by default. Add
   latency, or a pinned endpoint with color-coded p50 stats
 - Per-profile default model, assistant name, default system prompt, and user
   profile (your name and context)
+- Per-profile OpenRouter, Tavily, and local backend keys entered in Settings,
+  masked as passwords, and encrypted at rest; a server-wide OpenRouter key
+  remains available as a fallback
 - System prompt presets: built-in Assistant, Coder, Minimal, Researcher, Editor,
   and Teacher, plus custom presets saved from any system prompt
 - Prompt library with per-profile CRUD, search, insert, and “use as system”
-- OpenRouter server tools: per-chat web search/web fetch switch with a custom
-  tool-call cap, always-on date/time and model-catalog search, and numbered
-  assistant step cards with collapsible reasoning, tool arguments, results, and
-  source citations
+- Web search and fetch through a per-profile provider choice: OpenRouter server
+  tools, or Tavily executed by Clachan with an automatic switch to OpenRouter
+  for the rest of a reply when Tavily fails. Each chat can override the profile
+  default beside the Web on/off switch, with a custom tool-call cap,
+  always-on date/time and model-catalog search, and numbered assistant step
+  cards with collapsible reasoning, tool arguments, results, and source citations
 - Collapsible reasoning blocks on replies, plus a per-chat reasoning-effort
   menu fed by the model catalogue (`supported_efforts` / `default_effort`)
 - Image, PDF, and text attachments: images are downscaled in the browser before
@@ -180,8 +187,9 @@ message back to the database.
 
 **Account**
 
-- An [OpenRouter](https://openrouter.ai) API key, or at least one local
-  OpenAI-compatible backend on the LAN
+- An [OpenRouter](https://openrouter.ai) API key, a Tavily key for the Tavily
+  web provider, or at least one local OpenAI-compatible backend on the LAN. Keys
+  can be added per profile in Settings after the first sign-in.
 
 ## Build
 
@@ -196,7 +204,7 @@ verifies the result is `linux/arm64`. The actual build is exactly:
 
 ```powershell
 $env:GOOS="linux"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w -X main.version=1.1.4" -o clachan .
+go build -trimpath -ldflags "-s -w -X main.version=1.1.5" -o clachan .
 ```
 
 The tagged release workflow builds all four release targets. To do the same
@@ -205,14 +213,15 @@ locally, set `GOOS` and `GOARCH` to one of `linux/amd64`, `linux/arm64`,
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-  go build -trimpath -ldflags "-s -w -X main.version=1.1.4" -o clachan .
+  go build -trimpath -ldflags "-s -w -X main.version=1.1.5" -o clachan .
 ```
 
 Do **not** use a Windows build for Linux deployment: it fails with `Exec format
 error`. The resulting binary embeds the frontend; nothing else needs to be copied
 alongside it except the database and environment file.
 
-Building needs no API key. The key is only read when the server starts.
+Building needs no API key. Keys are read from the environment at startup or added
+in the app; the browser never receives a saved key.
 
 ## Development
 
@@ -220,11 +229,11 @@ From a checkout, with Go 1.27 or newer:
 
 ```bash
 cp .env.example .env
-# edit .env and set OPENROUTER_API_KEY
 go run .
 ```
 
-Open <http://localhost:7654>. The first visit creates the owner profile.
+Open <http://localhost:7654>. The first visit creates the owner profile; add API
+keys later in Settings → Backends & keys.
 
 For a disposable development database, point `CLACHAN_DB` at a temporary file:
 
@@ -271,7 +280,9 @@ purge.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | *(empty)* | Server-side only; never sent to the browser. Required for OpenRouter chats. |
+| `OPENROUTER_API_KEY` | *(empty)* | Server-side fallback key, used by profiles that have not saved their own key. |
+| `CLACHAN_SECRET_KEY` | *(auto-generated)* | Passphrase or 64-hex-character key for encrypting saved API keys. When unset, a random key is created at `data/secret.key` (mode 0600). |
+| `TAVILY_BASE_URL` | `https://api.tavily.com` | Tavily API base for Clachan-run web search and fetch. |
 | `CLACHAN_ADDR` | `:7654` | Listen address. Use `:7654` for LAN access. |
 | `CLACHAN_DB` | `./data/clachan.db` | SQLite file. Its parent directory is created if missing. |
 | `DEFAULT_MODEL` | `deepseek/deepseek-v4.1-flash-1017` | Model for new conversations. |
@@ -283,9 +294,15 @@ purge.
 `OPENROUTER_REFERER` defaults to the project repository, so OpenRouter
 attribution identifies Clachan. Forks should override it with their own URL.
 
-The server starts without a key and serves the UI. OpenRouter chats are rejected
-with a clear message until `OPENROUTER_API_KEY` is set; a configured local
-backend works without it.
+The server starts without a key and serves the UI. Profiles can save their own
+OpenRouter and Tavily keys in Settings → Backends & keys, and OpenRouter chats
+fall back to the server-wide `OPENROUTER_API_KEY` when a profile has not saved
+one. A configured local backend works without any OpenRouter key.
+
+Saved API keys are encrypted with AES-256-GCM before they reach SQLite. Set
+`CLACHAN_SECRET_KEY` to a long passphrase (or 64 hex characters) to control the
+key yourself; otherwise Clachan generates `data/secret.key` next to the database.
+Back that file up with the database, and keep both private.
 
 ## Manual deployment
 
@@ -374,8 +391,8 @@ The database, `.env`, and service configuration are not touched.
 Tagged releases are built by GitHub Actions for all four targets:
 
 ```bash
-git tag -a v1.1.4 -m "v1.1.4"
-git push origin v1.1.4
+git tag -a v1.1.5 -m "v1.1.5"
+git push origin v1.1.5
 ```
 
 The workflow attaches the four binaries, `install.sh`, `install.ps1`, and
@@ -399,12 +416,12 @@ Session required:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/chat` | Stream a reply as SSE. Body: `conversationId`, `content`, optional `attachments` (image/PDF/text parts), `toolsEnabled`, `maxToolCalls`, `reasoningEffort`, `timezone`, `provider`, `model`, `action` (`regenerate`, `edit`), `messageId`. `provider` is `openrouter` or a local backend ID. Events include `meta`, `delta`, `reasoning`, `step`, `citation`, `done`, and `error`. |
+| `POST` | `/api/chat` | Stream a reply as SSE. Body: `conversationId`, `content`, optional `attachments` (image/PDF/text parts), `toolsEnabled`, `maxToolCalls`, `webProvider` (`openrouter`, `tavily`, or empty to follow the profile), `reasoningEffort`, `timezone`, `provider`, `model`, `action` (`regenerate`, `edit`), `messageId`. `provider` is `openrouter` or a local backend ID. Events include `meta`, `delta`, `reasoning`, `step`, `citation`, `done`, and `error`. |
 | `GET` | `/api/conversations` | List conversations with a preview and the saved reasoning effort. |
-| `POST` | `/api/conversations` | Create a conversation, including initial `toolsEnabled`, `maxToolCalls`, and `reasoningEffort`. |
+| `POST` | `/api/conversations` | Create a conversation, including initial `toolsEnabled`, `maxToolCalls`, `webProvider`, and `reasoningEffort`. |
 | `POST` | `/api/conversations/import` | Import a JSON conversation export into the signed-in profile. |
 | `GET` | `/api/conversations/{id}` | Full history, including reasoning, tool steps, citations, and tool summaries. |
-| `PATCH` | `/api/conversations/{id}` | Rename, system prompt, provider/model, provider routing, or tool/reasoning settings (`toolsEnabled`, `maxToolCalls`, `reasoningEffort`). |
+| `PATCH` | `/api/conversations/{id}` | Rename, system prompt, provider/model, provider routing, or tool/reasoning settings (`toolsEnabled`, `maxToolCalls`, `webProvider`, `reasoningEffort`). |
 | `DELETE` | `/api/conversations/{id}` | Delete a conversation and its messages. |
 | `POST` | `/api/conversations/{id}/branch` | Copy the conversation up to and including `messageId` into a new conversation and return it. |
 | `PATCH` | `/api/messages/{id}` | Edit a message's `content` in place without regenerating. |
@@ -415,12 +432,12 @@ Session required:
 | `DELETE` | `/api/prompts/{id}` | Delete a prompt. |
 | `GET` | `/api/models` | Cached authenticated catalogue with pricing and capability metadata. |
 | `GET` | `/api/backends` | Backend list for this profile: OpenRouter status plus each local backend's saved address, model, and whether a key is stored. |
-| `PUT` | `/api/backends/{id}` | Save a local backend (`baseUrl`, optional `label`, `model`, `apiKey`, `clearKey`). Keys are stored server-side and never returned. |
+| `PUT` | `/api/backends/{id}` | Save a local backend (`baseUrl`, optional `label`, `model`, `apiKey`, `clearKey`). `id` may be `openrouter` to save just this profile's OpenRouter key (`apiKey` or `clearKey`). Keys are encrypted at rest and never returned. |
 | `DELETE` | `/api/backends/{id}` | Forget a local backend for this profile. |
 | `GET` | `/api/backends/{id}/models` | Proxy the backend's `/v1/models` list. The browser never contacts the LAN server directly. |
 | `GET` | `/api/model-endpoints?model=author/slug` | Cached provider endpoints with p50 latency/throughput, uptime, quantization, and native tools. |
 | `POST` | `/api/auth/password` | Change your password (requires the current one). |
-| `PATCH` | `/api/profile` | Change profile settings: default model and provider, assistant name, default system prompt, your name/context, and ignored provider slugs. |
+| `PATCH` | `/api/profile` | Change profile settings: default model and provider, assistant name, default system prompt, your name/context, ignored provider slugs, default web provider (`webProvider`), and the Tavily key (`tavilyKey` or `clearTavilyKey`). |
 | `GET` | `/api/profiles` | Owner only. List profiles. |
 | `POST` | `/api/profiles` | Owner only. Create a profile. |
 
@@ -470,21 +487,27 @@ must send a request body and read the stream with `fetch`.
   transcript at that point and streams a fresh reply. The branch button copies
   the conversation up to and including the chosen message into a new chat with
   the same provider, model, prompt, routing, tool, and reasoning settings.
-- **Local backends are per profile and text-only.** Settings → Backends stores an
-  address, optional API key, and default model for KoboldCpp, Ollama, LM Studio,
-  llama.cpp, or a custom OpenAI-compatible server. Clachan normalises the address
-  to a `/v1` base, proxies `/v1/models` for the picker, and sends chat through
-  `/v1/chat/completions`. The browser never contacts the LAN server, so no CORS
-  setup is needed. Local chats do not send server tools, provider routing, or
-  reasoning effort, and image/PDF attachments are rejected; text and code files
-  are inlined into the message. The model picker has one tab per configured
-  backend, and each provider remembers its own last model in browser storage.
-  Keys are stored in SQLite and never returned to the browser; the API exposes
-  only `hasKey`.
-- **Tools are per conversation.** The message-bar toggle controls
-  `openrouter:web_search` and `openrouter:web_fetch`; the last state is remembered
-  for new chats. The max-call field (1–30) sets OpenRouter's top-level
-  `max_tool_calls` budget. `openrouter:datetime` and
+- **Local backends are per profile and text-only.** Settings → Backends & keys
+  stores an address, optional API key, and default model for KoboldCpp, Ollama,
+  LM Studio, llama.cpp, or a custom OpenAI-compatible server. Clachan normalises
+  the address to a `/v1` base, proxies `/v1/models` for the picker, and sends chat
+  through `/v1/chat/completions`. The browser never contacts the LAN server, so
+  no CORS setup is needed. Local chats do not send server tools, provider
+  routing, or reasoning effort, and image/PDF attachments are rejected; text and
+  code files are inlined into the message. The model picker has one tab per
+  configured backend, and each provider remembers its own last model in browser
+  storage. Keys are encrypted at rest and never returned to the browser; the API
+  exposes only `hasKey`.
+- **Web provider is per profile, with a per-chat override.** Settings chooses
+  OpenRouter or Tavily for new chats. The message bar can override it beside the
+  Web on/off switch. OpenRouter runs search and fetch server-side; Tavily runs as
+  `tavily_search` and `tavily_extract` function calls executed by Clachan. If a
+  Tavily call fails, the rest of that reply switches to OpenRouter's web tools so
+  the user still gets an answer, without changing the saved choice.
+- **Tools are per conversation.** The message-bar toggle turns web search and
+  fetch on or off; the last state is remembered for new chats. The max-call field
+  (1–30) sets the top-level `max_tool_calls` budget and OpenRouter's per-tool
+  `max_uses`; Tavily calls draw from the same budget. `openrouter:datetime` and
   `openrouter:experimental__search_models` are always included because they are
   free and low-risk.
 - **Replies use the OpenResponses API.** Chats go to `POST /responses`, not
@@ -601,10 +624,13 @@ travel in cleartext. Profiles give separation between people sharing the server,
 not protection from someone who can sniff your network. Keep it on a trusted
 network, or put TLS in front of it.
 
-- API keys stay on the server. The browser only ever talks to Clachan.
-- All profiles share the server's OpenRouter key and credits; there are no
-  per-profile OpenRouter keys. Local backend keys are per profile, stored in
-  SQLite, and never returned to the browser.
+- API keys stay on the server. The browser only ever talks to Clachan and never
+  receives a saved key back.
+- OpenRouter and Tavily keys are per profile and encrypted at rest with
+  AES-256-GCM; the server-wide `OPENROUTER_API_KEY` is a fallback for profiles
+  that have not saved a key. Local backend keys use the same encryption. A host
+  compromise can still read the keys, and each profile's key spends that
+  profile's credits.
 - Local backend addresses are user-supplied. Clachan only accepts `http`/`https`
   URLs without embedded credentials, query strings, or fragments. The server
   makes the request, so a profile can point Clachan at any host the server can
@@ -622,6 +648,9 @@ main.go         server wiring, graceful shutdown, embedded static files
 config.go       environment and minimal .env loader
 provider.go     OpenRouter client, shared HTTP client, model and endpoint caches
 backends.go     local backend specs, per-profile config, URL/model validation, model proxy
+chatloop.go     multi-round Responses loop, Tavily execution, OpenRouter fallback
+secrets.go      AES-256-GCM secret box, key file, plaintext key migration
+webtools.go     Tavily Search/Extract clients, function tools, step rendering
 localchat.go    OpenAI chat-completions client and OpenResponses stream adapter
 responses.go    Responses event parsing, reasoning, tool steps, citations
 store.go        SQLite schema, migrations, profile-scoped queries

@@ -25,6 +25,7 @@ type Citation struct {
 type ChatStep struct {
 	ID         string     `json:"id,omitempty"`
 	Tool       string     `json:"tool"`
+	Provider   string     `json:"provider,omitempty"`
 	Query      string     `json:"query,omitempty"`
 	Arguments  string     `json:"arguments,omitempty"`
 	Status     string     `json:"status,omitempty"`
@@ -54,19 +55,22 @@ type ToolRun struct {
 }
 
 type serverTool struct {
-	Type       string `json:"type"`
-	Parameters any    `json:"parameters,omitempty"`
+	Type        string `json:"type"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
 }
 
 // buildServerTools always includes free, low-risk tools. Web search and fetch
-// follow the user's per-chat switch.
+// follow the user's per-chat switch and the selected engine.
 //
 // maxCalls is applied twice on purpose. The request-level max_tool_calls only
 // bounds agent rounds, and a model can fan several searches out inside one
 // round, so on its own it lets a reply exceed the number the user picked.
 // max_uses is the per-tool budget OpenRouter enforces on executed searches and
-// fetches, which is what the "Max calls" control actually promises.
-func buildServerTools(webEnabled bool, timezone string, maxCalls int) []serverTool {
+// fetches, which is what the "Max calls" control actually promises. Tavily runs
+// through Clachan, which enforces the same budget itself.
+func buildServerTools(webProvider string, webEnabled bool, timezone string, maxCalls int) []serverTool {
 	if !validTimezone(timezone) {
 		timezone = "UTC"
 	}
@@ -81,23 +85,28 @@ func buildServerTools(webEnabled bool, timezone string, maxCalls int) []serverTo
 			Parameters: map[string]any{"max_results": 5},
 		},
 	}
-	if webEnabled {
-		tools = append(tools,
-			serverTool{
-				Type: "openrouter:web_search",
-				Parameters: map[string]any{
-					"max_results":       5,
-					"max_total_results": 20,
-					"max_uses":          maxCalls,
-				},
-			},
-			serverTool{
-				Type:       "openrouter:web_fetch",
-				Parameters: map[string]any{"max_uses": maxCalls},
-			},
-		)
+	if !webEnabled {
+		return tools
 	}
-	return tools
+
+	if normalizeWebProvider(webProvider) == webProviderTavily {
+		return append(tools, tavilySearchTool(), tavilyExtractTool())
+	}
+
+	return append(tools,
+		serverTool{
+			Type: "openrouter:web_search",
+			Parameters: map[string]any{
+				"max_results":       5,
+				"max_total_results": 20,
+				"max_uses":          maxCalls,
+			},
+		},
+		serverTool{
+			Type:       "openrouter:web_fetch",
+			Parameters: map[string]any{"max_uses": maxCalls},
+		},
+	)
 }
 
 func validTimezone(value string) bool {

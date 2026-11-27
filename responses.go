@@ -32,6 +32,8 @@ type responseItem struct {
 	Type       string          `json:"type"`
 	Status     string          `json:"status"`
 	Role       string          `json:"role"`
+	CallID     string          `json:"call_id"`
+	Name       string          `json:"name"`
 	Action     *responseAction `json:"action"`
 	URL        string          `json:"url"`
 	Title      string          `json:"title"`
@@ -44,6 +46,19 @@ type responseItem struct {
 	Timezone   string          `json:"timezone"`
 	Refusal    string          `json:"refusal"`
 	Error      string          `json:"error"`
+
+	raw json.RawMessage
+}
+
+func (item *responseItem) UnmarshalJSON(data []byte) error {
+	type plain responseItem
+	var parsed plain
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*item = responseItem(parsed)
+	item.raw = append(item.raw[:0], data...)
+	return nil
 }
 
 type responsesResult struct {
@@ -219,20 +234,67 @@ func citationMap(citations []Citation) map[string]Citation {
 }
 
 func mergeStepSources(list []Citation, extra []Citation) []Citation {
-	seen := make(map[string]bool, len(list)+len(extra))
-	for _, source := range list {
+	index := make(map[string]int, len(list)+len(extra))
+	for i, source := range list {
 		if source.URL != "" {
-			seen[source.URL] = true
+			index[source.URL] = i
 		}
 	}
 	for _, source := range extra {
-		if source.URL == "" || seen[source.URL] {
+		if source.URL == "" {
 			continue
 		}
-		seen[source.URL] = true
+		if i, ok := index[source.URL]; ok {
+			// A step is streamed before its final citation metadata arrives, so
+			// fill in the title and excerpt rather than keeping the bare URL.
+			if list[i].Title == "" || list[i].Title == hostLabel(source.URL) {
+				if source.Title != "" {
+					list[i].Title = source.Title
+				}
+			}
+			if list[i].Excerpt == "" {
+				list[i].Excerpt = source.Excerpt
+			}
+			continue
+		}
+		index[source.URL] = len(list)
 		list = append(list, source)
 	}
 	return list
+}
+
+// mergeChatStep folds a second view of the same tool step into the one already
+// emitted. Streaming sends the step when the upstream item finishes; the
+// transcript is rebuilt after all events, when citations are known.
+func mergeChatStep(existing *ChatStep, incoming ChatStep) {
+	if existing.Tool == "" {
+		existing.Tool = incoming.Tool
+	}
+	if existing.Provider == "" {
+		existing.Provider = incoming.Provider
+	}
+	if existing.Query == "" {
+		existing.Query = incoming.Query
+	}
+	if existing.Arguments == "" {
+		existing.Arguments = incoming.Arguments
+	}
+	if existing.Status == "" {
+		existing.Status = incoming.Status
+	}
+	if existing.Reasoning == "" {
+		existing.Reasoning = incoming.Reasoning
+	}
+	if existing.Result == "" {
+		existing.Result = incoming.Result
+	}
+	if existing.Error == "" {
+		existing.Error = incoming.Error
+	}
+	if existing.DurationMS == 0 {
+		existing.DurationMS = incoming.DurationMS
+	}
+	existing.Sources = mergeStepSources(existing.Sources, incoming.Sources)
 }
 
 func responseItemSources(item *responseItem, citations map[string]Citation) []Citation {
@@ -284,6 +346,9 @@ func buildResponseStep(item *responseItem, reasoning string, citations map[strin
 		Sources:    responseItemSources(item, citations),
 		Error:      strings.TrimSpace(item.Error),
 		DurationMS: elapsed.Milliseconds(),
+	}
+	if tool == "web_search" || tool == "web_fetch" {
+		step.Provider = webProviderOpenRouter
 	}
 	if step.Status == "" {
 		step.Status = "completed"
@@ -407,6 +472,10 @@ func buildResponseTranscript(output []responseItem, reasoning map[int]string, ci
 			if text != "" {
 				pending = append(pending, text)
 			}
+		case item.Type == "function_call":
+			// Tavily calls are executed by Clachan, and their reasoning is
+			// attached by the chat loop. Do not leak it into the final answer.
+			pending = nil
 		case isResponseToolType(item.Type):
 			step := buildResponseStep(&item, strings.Join(pending, "\n\n"), byURL, 0)
 			steps = append(steps, step)
@@ -461,7 +530,7 @@ func attachUnmatchedCitations(steps []ChatStep, citations []Citation) {
 func lastResponseMessageText(output []responseItem) string {
 	for i := len(output) - 1; i >= 0; i-- {
 		item := &output[i]
-		if item.Type == "reasoning" || isResponseToolType(item.Type) {
+		if item.Type == "reasoning" || item.Type == "function_call" || isResponseToolType(item.Type) {
 			continue
 		}
 		// Do not require type "message": some upstreams label the final item
@@ -471,6 +540,103 @@ func lastResponseMessageText(output []responseItem) string {
 		}
 	}
 	return ""
+}
+
+// responseFunctionCalls lists the model-requested function calls in output
+// order. Clachan executes these itself so the upstream never sees the Tavily
+// key.
+func responseFunctionCalls(output []responseItem) []functionCall {
+	calls := make([]functionCall, 0, 2)
+	for _, item := range output {
+		if item.Type != "function_call" {
+			continue
+		}
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		calls = append(calls, functionCall{
+			ID:        strings.TrimSpace(item.ID),
+			CallID:    strings.TrimSpace(item.CallID),
+			Name:      name,
+			Arguments: strings.TrimSpace(item.Arguments),
+		})
+	}
+	return calls
+}
+
+// responseFunctionEcho builds the assistant items a stateless follow-up request
+// must carry so each function_call_output has a matching call. Reasoning items
+// are replayed verbatim so providers that sign their reasoning keep a valid
+// chain across rounds.
+func responseFunctionEcho(output []responseItem) []responseInputMessage {
+	echo := make([]responseInputMessage, 0, len(output))
+	seen := make(map[string]bool, len(output))
+	for _, item := range output {
+		switch item.Type {
+		case "reasoning":
+			if len(item.raw) == 0 {
+				continue
+			}
+			key := "reasoning:" + strings.TrimSpace(item.ID)
+			if key == "reasoning:" {
+				key = "reasoning:" + string(item.raw)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			echo = append(echo, responseInputMessage{Type: "reasoning", raw: item.raw})
+		case "function_call":
+			name := strings.TrimSpace(item.Name)
+			if name == "" {
+				continue
+			}
+			key := strings.TrimSpace(item.CallID)
+			if key == "" {
+				key = strings.TrimSpace(item.ID)
+			}
+			if key != "" && seen[key] {
+				continue
+			}
+			if key != "" {
+				seen[key] = true
+			}
+			status := strings.TrimSpace(item.Status)
+			if status == "" {
+				status = "completed"
+			}
+			echo = append(echo, responseInputMessage{
+				Type:      "function_call",
+				ID:        strings.TrimSpace(item.ID),
+				CallID:    strings.TrimSpace(item.CallID),
+				Name:      name,
+				Arguments: strings.TrimSpace(item.Arguments),
+				Status:    status,
+			})
+		case "message":
+			if len(item.raw) > 0 && strings.TrimSpace(item.messageText()) != "" {
+				echo = append(echo, responseInputMessage{Type: "message", raw: item.raw})
+				continue
+			}
+			text := strings.TrimSpace(item.messageText())
+			if text == "" {
+				continue
+			}
+			status := strings.TrimSpace(item.Status)
+			if status == "" {
+				status = "completed"
+			}
+			echo = append(echo, responseInputMessage{
+				Type:    "message",
+				Role:    "assistant",
+				ID:      strings.TrimSpace(item.ID),
+				Content: text,
+				Status:  status,
+			})
+		}
+	}
+	return echo
 }
 
 // stringField pulls a single string field out of an event payload. It is used

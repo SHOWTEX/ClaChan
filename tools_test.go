@@ -19,7 +19,7 @@ func toolParams(t *testing.T, tools []serverTool, name string) map[string]any {
 }
 
 func TestBuildServerToolsCapsSearchesAndFetches(t *testing.T) {
-	tools := buildServerTools(true, "Europe/London", 3)
+	tools := buildServerTools(webProviderOpenRouter, true, "Europe/London", 3)
 
 	search := toolParams(t, tools, "openrouter:web_search")
 	if got := search["max_uses"]; got != 3 {
@@ -41,8 +41,24 @@ func TestBuildServerToolsCapsSearchesAndFetches(t *testing.T) {
 	toolParams(t, tools, "openrouter:experimental__search_models")
 }
 
+func TestBuildServerToolsTavily(t *testing.T) {
+	tools := buildServerTools(webProviderTavily, true, "UTC", 4)
+
+	names := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		names[tool.Name] = tool.Type
+		if tool.Type == "openrouter:web_search" || tool.Type == "openrouter:web_fetch" {
+			t.Fatalf("OpenRouter web tool present in Tavily mode: %+v", tool)
+		}
+	}
+	if names[tavilySearchFunction] != "function" || names[tavilyExtractFunction] != "function" {
+		t.Fatalf("Tavily function tools missing: %+v", names)
+	}
+	toolParams(t, tools, "openrouter:datetime")
+}
+
 func TestBuildServerToolsWithoutWeb(t *testing.T) {
-	tools := buildServerTools(false, "", 6)
+	tools := buildServerTools(webProviderOpenRouter, false, "", 6)
 
 	for _, tool := range tools {
 		switch tool.Type {
@@ -68,7 +84,7 @@ func TestBuildServerToolsClampsMaxCalls(t *testing.T) {
 		{maxToolCallsLimit + 1, maxToolCallsLimit},
 	}
 	for _, tc := range cases {
-		tools := buildServerTools(true, "UTC", tc.in)
+		tools := buildServerTools(webProviderOpenRouter, true, "UTC", tc.in)
 		if got := toolParams(t, tools, "openrouter:web_search")["max_uses"]; got != tc.want {
 			t.Fatalf("max_uses for %d = %v, want %d", tc.in, got, tc.want)
 		}

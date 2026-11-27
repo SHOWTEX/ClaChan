@@ -41,7 +41,7 @@ var backendSpecs = []backendSpec{
 	{
 		ID:    providerOpenRouter,
 		Label: "OpenRouter",
-		Hint:  "Cloud models. The server API key lives in CLACHAN's .env file.",
+		Hint:  "Cloud models and the default web search/fetch engine. Save a key here to use it for this profile.",
 	},
 	{
 		ID:         backendKobold,
@@ -100,19 +100,26 @@ func localBackendSpecs() []backendSpec {
 }
 
 // providerFor resolves a profile's saved backend into the in-memory provider
-// shape used by the chat handler. OpenRouter stays server-wide; local backends
-// are per profile.
+// shape used by the chat handler. OpenRouter uses the profile's own key when it
+// has one and otherwise falls back to the server-wide key; local backends are
+// always per profile.
 func (s *Server) providerFor(ctx context.Context, profileID, providerID string) (*Provider, error) {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
 		providerID = providerOpenRouter
 	}
 	if providerID == providerOpenRouter {
-		provider, ok := s.providers[providerOpenRouter]
+		base, ok := s.providers[providerOpenRouter]
 		if !ok {
 			return nil, ErrUnknownProvider
 		}
-		return provider, nil
+		provider := *base
+		if key, _, err := s.profileOpenRouterKey(ctx, profileID); err == nil && key != "" {
+			provider.APIKey = key
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			s.log.Warn("load profile OpenRouter key", "err", err, "profile", profileID)
+		}
+		return &provider, nil
 	}
 
 	spec, ok := backendSpecFor(providerID)
@@ -135,15 +142,63 @@ func (s *Server) providerFor(ctx context.Context, profileID, providerID string) 
 	if label == "" {
 		label = spec.Label
 	}
+	apiKey := saved.APIKey
+	if apiKey != "" && s.secrets != nil {
+		decrypted, err := s.secrets.openLoose(apiKey)
+		if err != nil {
+			s.log.Warn("decrypt backend key", "backend", providerID, "profile", profileID, "err", err)
+			apiKey = ""
+		} else {
+			apiKey = decrypted
+		}
+	}
 	return &Provider{
 		ID:           providerID,
 		Label:        label,
 		BaseURL:      saved.BaseURL,
-		APIKey:       saved.APIKey,
+		APIKey:       apiKey,
 		DefaultModel: saved.Model,
 		Wire:         "chat",
 		Local:        true,
 	}, nil
+}
+
+// profileOpenRouterKey prefers the key saved for this profile, then the
+// server-wide environment key. The boolean reports whether the profile has its
+// own key (not whether a key is available at all).
+func (s *Server) profileOpenRouterKey(ctx context.Context, profileID string) (string, bool, error) {
+	sealed, _, err := s.store.profileSecretKeys(ctx, profileID)
+	if err != nil {
+		return "", false, err
+	}
+	if sealed != "" {
+		if s.secrets == nil {
+			return "", true, errors.New("secret storage is not initialised")
+		}
+		key, err := s.secrets.open(sealed)
+		if err != nil {
+			return "", true, err
+		}
+		return key, true, nil
+	}
+	if base, ok := s.providers[providerOpenRouter]; ok {
+		return base.APIKey, false, nil
+	}
+	return "", false, nil
+}
+
+func (s *Server) profileTavilyKey(ctx context.Context, profileID string) (string, error) {
+	_, sealed, err := s.store.profileSecretKeys(ctx, profileID)
+	if err != nil {
+		return "", err
+	}
+	if sealed == "" {
+		return "", nil
+	}
+	if s.secrets == nil {
+		return "", errors.New("secret storage is not initialised")
+	}
+	return s.secrets.open(sealed)
 }
 
 // normalizeBackendURL accepts the address a user would paste into a browser
@@ -248,6 +303,7 @@ type backendInfo struct {
 	BaseURL    string `json:"baseUrl,omitempty"`
 	Model      string `json:"model,omitempty"`
 	HasKey     bool   `json:"hasKey,omitempty"`
+	ServerKey  bool   `json:"serverKey,omitempty"`
 }
 
 func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
@@ -279,10 +335,15 @@ func (s *Server) handleListBackends(w http.ResponseWriter, r *http.Request) {
 		}
 		if spec.ID == providerOpenRouter {
 			if provider, ok := s.providers[providerOpenRouter]; ok {
-				info.Configured = provider.enabled()
+				profileKey, hasProfileKey, err := s.profileOpenRouterKey(r.Context(), profile.ID)
+				if err != nil {
+					s.log.Warn("load profile OpenRouter key", "err", err)
+				}
+				info.Configured = profileKey != "" || provider.APIKey != ""
 				info.BaseURL = provider.BaseURL
 				info.Model = s.cfg.DefaultModel
-				info.HasKey = provider.APIKey != ""
+				info.HasKey = hasProfileKey
+				info.ServerKey = provider.APIKey != ""
 			}
 		} else if backend, ok := byID[spec.ID]; ok {
 			info.Configured = strings.TrimSpace(backend.BaseURL) != ""
@@ -307,7 +368,7 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 
 	id := strings.TrimSpace(r.PathValue("id"))
 	spec, ok := backendSpecFor(id)
-	if !ok || !spec.Local {
+	if !ok || (!spec.Local && spec.ID != providerOpenRouter) {
 		writeError(w, http.StatusBadRequest, "bad_request", "That backend cannot be configured here.", 0)
 		return
 	}
@@ -321,6 +382,11 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(w, r, &req, maxJSONBody); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), 0)
+		return
+	}
+
+	if spec.ID == providerOpenRouter {
+		s.saveOpenRouterKey(w, r, profile, req.APIKey, req.ClearKey)
 		return
 	}
 
@@ -351,12 +417,24 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "storage", "Could not load the backend.", 0)
 		return
 	}
+	storedKey := ""
 	apiKey := ""
 	if existing != nil {
-		apiKey = existing.APIKey
+		storedKey = existing.APIKey
+		if storedKey != "" && s.secrets != nil {
+			decrypted, err := s.secrets.openLoose(storedKey)
+			if err != nil {
+				s.log.Warn("decrypt backend key", "backend", id, "err", err)
+			} else {
+				apiKey = decrypted
+			}
+		} else {
+			apiKey = storedKey
+		}
 	}
 	switch {
 	case req.ClearKey:
+		storedKey = ""
 		apiKey = ""
 	case req.APIKey != nil:
 		// An empty box means "keep the saved key", so the browser never has
@@ -367,14 +445,28 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			apiKey = value
+			storedKey = ""
 		}
+	}
+	if storedKey == "" && apiKey != "" {
+		if s.secrets == nil {
+			writeError(w, http.StatusInternalServerError, "storage", "Secret storage is not available.", 0)
+			return
+		}
+		sealed, err := s.secrets.seal(apiKey)
+		if err != nil {
+			s.log.Error("encrypt backend key", "err", err, "backend", id)
+			writeError(w, http.StatusInternalServerError, "storage", "Could not save the API key.", 0)
+			return
+		}
+		storedKey = sealed
 	}
 
 	saved := ProfileBackend{
 		BackendID: id,
 		Label:     label,
 		BaseURL:   baseURL,
-		APIKey:    apiKey,
+		APIKey:    storedKey,
 		Model:     model,
 	}
 	if err := s.store.saveProfileBackend(r.Context(), profile.ID, saved); err != nil {
@@ -393,6 +485,64 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 		BaseURL:    baseURL,
 		Model:      model,
 		HasKey:     apiKey != "",
+	})
+}
+
+func (s *Server) saveOpenRouterKey(w http.ResponseWriter, r *http.Request, profile *Profile, apiKey *string, clearKey bool) {
+	sealed, _, err := s.store.profileSecretKeys(r.Context(), profile.ID)
+	if err != nil {
+		s.log.Error("load OpenRouter key", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not load the saved key.", 0)
+		return
+	}
+	hasKey := sealed != ""
+	switch {
+	case clearKey:
+		sealed = ""
+		hasKey = false
+	case apiKey != nil:
+		value := strings.TrimSpace(*apiKey)
+		if value != "" {
+			if !validBackendAPIKey(value) {
+				writeError(w, http.StatusBadRequest, "bad_request", "That API key is invalid.", 0)
+				return
+			}
+			if s.secrets == nil {
+				writeError(w, http.StatusInternalServerError, "storage", "Secret storage is not available.", 0)
+				return
+			}
+			sealed, err = s.secrets.seal(value)
+			if err != nil {
+				s.log.Error("encrypt OpenRouter key", "err", err)
+				writeError(w, http.StatusInternalServerError, "storage", "Could not save the API key.", 0)
+				return
+			}
+			hasKey = true
+		}
+	}
+	if err := s.store.updateProfileOpenRouterKey(r.Context(), profile.ID, sealed); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "Profile not found.", 0)
+			return
+		}
+		s.log.Error("save OpenRouter key", "err", err)
+		writeError(w, http.StatusInternalServerError, "storage", "Could not save the API key.", 0)
+		return
+	}
+
+	serverKey := false
+	if base, ok := s.providers[providerOpenRouter]; ok {
+		serverKey = base.APIKey != ""
+	}
+	writeJSON(w, http.StatusOK, backendInfo{
+		ID:         providerOpenRouter,
+		Label:      "OpenRouter",
+		Hint:       "Cloud models and the default web search/fetch engine. Save a key here to use it for this profile.",
+		Configured: hasKey || serverKey,
+		HasKey:     hasKey,
+		ServerKey:  serverKey,
+		BaseURL:    s.cfg.BaseURL,
+		Model:      s.cfg.DefaultModel,
 	})
 }
 
